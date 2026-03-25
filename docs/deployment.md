@@ -48,6 +48,7 @@ The LLM client is OpenAI-compatible. It works with any provider that implements 
 | `KIMI_API_KEY` | API key for your LLM provider | |
 | `KIMI_BASE_URL` | API base URL | `https://api.moonshot.cn/v1` |
 | `KIMI_MODEL` | Model name | `kimi-latest` |
+| `KIMI_USER_AGENT` | Custom User-Agent header (required by some endpoints) | |
 
 **Examples:**
 
@@ -66,6 +67,12 @@ KIMI_MODEL=gpt-4.1
 KIMI_API_KEY=sk-...
 KIMI_BASE_URL=https://api.moonshot.cn/v1
 KIMI_MODEL=kimi-latest
+
+# Kimi Coding (subscription API — requires Kimi Code membership)
+KIMI_API_KEY=sk-kimi-...
+KIMI_BASE_URL=https://api.kimi.com/coding/v1
+KIMI_MODEL=kimi-for-coding
+KIMI_USER_AGENT=claude-code/0.1.0
 ```
 
 Note: the Moonshot developer API at `api.moonshot.cn` requires a key from [platform.moonshot.cn](https://platform.moonshot.cn). A Kimi consumer subscription does **not** include API access.

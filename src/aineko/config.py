@@ -27,6 +27,7 @@ class KimiSettings(BaseSettings):
     model: str = "kimi-latest"
     base_url: str = "https://api.moonshot.cn/v1"
     max_context_tokens: int = 128_000
+    user_agent: str = ""  # required for some endpoints (e.g. Kimi coding API)
 
 
 class HeartbeatSettings(BaseSettings):

@@ -23,6 +23,7 @@ class ToolCall:
 @dataclass
 class ChatResponse:
     content: str = ""
+    reasoning_content: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
     finish_reason: str = ""
@@ -31,12 +32,15 @@ class ChatResponse:
 class KimiClient:
     def __init__(self, settings: KimiSettings) -> None:
         self._settings = settings
+        headers: dict[str, str] = {
+            "Authorization": f"Bearer {settings.api_key}",
+            "Content-Type": "application/json",
+        }
+        if settings.user_agent:
+            headers["User-Agent"] = settings.user_agent
         self._http = httpx.AsyncClient(
             base_url=settings.base_url,
-            headers={
-                "Authorization": f"Bearer {settings.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             timeout=120,
         )
 
@@ -55,6 +59,8 @@ class KimiClient:
             payload["tools"] = tools.schemas()
 
         resp = await self._http.post("/chat/completions", json=payload)
+        if resp.status_code >= 400:
+            logger.error("LLM API error %d: %s", resp.status_code, resp.text)
         resp.raise_for_status()
         data = resp.json()
 
@@ -63,6 +69,7 @@ class KimiClient:
 
         result = ChatResponse(
             content=msg.get("content", "") or "",
+            reasoning_content=msg.get("reasoning_content"),
             finish_reason=choice.get("finish_reason", ""),
             usage=data.get("usage", {}),
         )
@@ -92,8 +99,8 @@ class KimiClient:
             if not response.tool_calls:
                 return response
 
-            # Append assistant message with tool calls
-            messages.append({
+            # Append assistant message with tool calls (preserve reasoning_content for APIs that require it)
+            assistant_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": response.content or None,
                 "tool_calls": [
@@ -104,7 +111,10 @@ class KimiClient:
                     }
                     for tc in response.tool_calls
                 ],
-            })
+            }
+            if response.reasoning_content is not None:
+                assistant_msg["reasoning_content"] = response.reasoning_content
+            messages.append(assistant_msg)
 
             # Execute each tool call and append results
             for tc in response.tool_calls:

@@ -4,10 +4,12 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 
 from aineko.config import Settings
+from aineko.context import trim_messages
 from aineko.cron.scheduler import CronScheduler
 from aineko.db import create_tables, dispose_engine, get_session, init_engine
 from aineko.heartbeat.runner import HeartbeatRunner
@@ -21,6 +23,7 @@ from aineko.tools.bash import bash_tool
 from aineko.tools.create_skill import create_skill_tool
 from aineko.tools.files import read_file_tool, write_file_tool
 from aineko.tools.registry import ToolRegistry
+from aineko.tools.memory import memory_recall_tool
 from aineko.tools.web_search import web_search_tool
 
 logger = logging.getLogger(__name__)
@@ -33,25 +36,39 @@ def build_tools() -> ToolRegistry:
     registry.register(write_file_tool)
     registry.register(web_search_tool)
     registry.register(create_skill_tool)
+    registry.register(memory_recall_tool)
     return registry
 
 
-def build_system_prompt(skills: SkillsEngine) -> str:
+_DEFAULT_SOUL = (
+    "You are aineko, a personal AI assistant.\n\n"
+    "You can execute bash commands, read/write files, and search the web.\n"
+    "You run inside a container; /data is your persistent storage.\n\n"
+    "## Tools\n\n"
+    "Call tools when you need to take action. "
+    "Prefer concrete answers over asking the user to do things themselves.\n"
+)
+
+
+def build_system_prompt(skills: SkillsEngine, soul_path: Path, memory_dir: Path) -> str:
+    # Load soul from file, create default if missing
+    if soul_path.exists():
+        soul = soul_path.read_text()
+    else:
+        soul = _DEFAULT_SOUL
+        soul_path.write_text(soul)
+
     summaries = skills.summaries()
-    skill_block = ""
     if summaries:
         lines = [f"- **{s['name']}**: {s['description']}" for s in summaries]
-        skill_block = "\n\n## Available Skills\n" + "\n".join(lines)
+        soul += "\n\n## Available Skills\n" + "\n".join(lines)
 
-    return (
-        "You are aineko, a personal AI assistant. "
-        "You can execute bash commands, read/write files, and search the web. "
-        "You run inside a Docker container; /data is your persistent storage.\n\n"
-        "## Tools\n"
-        "Call tools when you need to take action. "
-        "Prefer concrete answers over asking the user to do things themselves.\n"
-        f"{skill_block}"
-    )
+    # Inject memory index if it exists
+    memory_index = memory_dir / "memory.md"
+    if memory_index.exists():
+        soul += "\n\n---\n\n" + memory_index.read_text()
+
+    return soul
 
 
 async def handle_message(
@@ -60,6 +77,9 @@ async def handle_message(
     tools: ToolRegistry,
     skills: SkillsEngine,
     matrix: MatrixConnector,
+    soul_path: Path,
+    memory_dir: Path,
+    max_context_tokens: int,
 ) -> None:
     """Core message handler: load session, run agent, send reply."""
     from sqlalchemy import select
@@ -92,9 +112,12 @@ async def handle_message(
         history = result.scalars().all()
 
         # Build messages for Kimi
-        messages = [{"role": "system", "content": build_system_prompt(skills)}]
+        messages = [{"role": "system", "content": build_system_prompt(skills, soul_path, memory_dir)}]
         for m in history:
             messages.append({"role": m.role.value, "content": m.content})
+
+        # Trim to fit context window
+        messages = trim_messages(messages, max_context_tokens)
 
         # Run agent loop
         response = await kimi.chat_loop(messages, tools)
@@ -108,9 +131,13 @@ async def handle_message(
         ))
         await db.commit()
 
-        # Send to Matrix
+        # Send to Matrix — split on --- separators for natural chat feel
         if response.content:
-            await matrix.send_message(msg.room_id, response.content)
+            parts = [p.strip() for p in response.content.split("\n---\n") if p.strip()]
+            for part in parts:
+                await matrix.send_message(msg.room_id, part)
+                if len(parts) > 1:
+                    await asyncio.sleep(0.6)
 
 
 @asynccontextmanager
@@ -132,9 +159,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Kimi
     kimi = KimiClient(settings.kimi)
 
+    # Soul + Memory
+    soul_path = settings.data_dir / "soul.md"
+    memory_dir = settings.data_dir / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    max_ctx = settings.kimi.max_context_tokens
+
     # Matrix
     matrix = MatrixConnector(settings.matrix, store_path=settings.data_dir / "crypto_store")
-    matrix.on_message(lambda msg: handle_message(msg, kimi, tools, skills, matrix))
+    matrix.on_message(lambda msg: handle_message(msg, kimi, tools, skills, matrix, soul_path, memory_dir, max_ctx))
 
     # Cron
     cron = CronScheduler()
@@ -143,7 +176,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     heartbeat = HeartbeatRunner(settings.heartbeat, settings.heartbeat_file)
 
     # Wire cron runner
-    sys_prompt = build_system_prompt(skills)
+    sys_prompt = build_system_prompt(skills, soul_path, memory_dir)
     cron.set_runner(
         lambda job: run_cron_job(job, kimi, tools, skills, matrix, sys_prompt)
     )
