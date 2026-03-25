@@ -52,6 +52,7 @@ class MatrixConnector:
 
         self._handler: MessageHandler | None = None
         self._running = False
+        self._sync_task: asyncio.Task[None] | None = None
 
     def on_message(self, handler: MessageHandler) -> None:
         self._handler = handler
@@ -136,14 +137,21 @@ class MatrixConnector:
         # Enter sync loop
         while self._running:
             try:
+                self._sync_task = asyncio.current_task()
                 await self._client.sync(timeout=30_000)
                 await self._trust_all_devices()
+            except asyncio.CancelledError:
+                logger.info("Matrix: sync loop cancelled")
+                break
             except Exception:
                 logger.exception("Matrix sync error, retrying...")
                 await asyncio.sleep(5)
+        self._sync_task = None
 
     async def stop(self) -> None:
         self._running = False
+        if self._sync_task and not self._sync_task.done():
+            self._sync_task.cancel()
         await self._client.close()
         logger.info("Matrix: disconnected")
 

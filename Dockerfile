@@ -34,5 +34,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --retries=3 \
     CMD curl -f http://localhost:8080/healthz || exit 1
 
-# Run migrations then start the app
-CMD ["sh", "-c", "uv run --no-dev alembic upgrade head && uv run --no-dev aineko"]
+# Run migrations then exec the app (exec replaces sh so Python gets SIGTERM)
+CMD ["sh", "-c", "uv run --no-dev alembic upgrade head && exec uv run --no-dev aineko"]

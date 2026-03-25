@@ -1,5 +1,6 @@
 """Async Kimi API client with streaming and tool call support."""
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -58,7 +59,17 @@ class KimiClient:
         if tools and tools.schemas():
             payload["tools"] = tools.schemas()
 
-        resp = await self._http.post("/chat/completions", json=payload)
+        # Retry on transient errors (429, 500, 502, 503, 504)
+        retryable = {429, 500, 502, 503, 504}
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            resp = await self._http.post("/chat/completions", json=payload)
+            if resp.status_code in retryable and attempt < max_retries:
+                delay = 2 ** attempt  # 1s, 2s, 4s
+                logger.warning("LLM API %d, retrying in %ds (attempt %d/%d)", resp.status_code, delay, attempt + 1, max_retries)
+                await asyncio.sleep(delay)
+                continue
+            break
         if resp.status_code >= 400:
             logger.error("LLM API error %d: %s", resp.status_code, resp.text)
         resp.raise_for_status()
