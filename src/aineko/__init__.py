@@ -1,0 +1,1 @@
+"""aineko — personal AI gateway."""

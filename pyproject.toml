@@ -1,0 +1,38 @@
+[project]
+name = "aineko"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Jakob Sachs", email = "jakobs99@purelymail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.20,<1",
+    "alembic>=1.14,<2",
+    "apscheduler>=3.10,<4",
+    "fastapi>=0.115,<1",
+    "httpx>=0.28,<1",
+    "matrix-nio[e2e]>=0.25,<1",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "python-frontmatter>=1.1,<2",
+    "sqlalchemy[asyncio]>=2.0,<3",
+    "uvicorn[standard]>=0.34,<1",
+    "watchfiles>=1.0,<2",
+]
+
+[project.scripts]
+aineko = "aineko.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.9.13,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13,<2",
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.24,<1",
+    "ruff>=0.8,<1",
+]
