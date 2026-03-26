@@ -1,7 +1,5 @@
 """Tests for sliding window context trimmer."""
 
-import pytest
-
 from aineko.context import estimate_tokens, trim_messages
 
 

@@ -71,6 +71,10 @@ class HeartbeatRunner:
         lines = content.strip().splitlines()
         for line in lines:
             stripped = line.strip()
-            if stripped and not stripped.startswith("#") and stripped not in ("- [ ]", "- [x]"):
+            if (
+                stripped
+                and not stripped.startswith("#")
+                and stripped not in ("- [ ]", "- [x]")
+            ):
                 return True
         return False

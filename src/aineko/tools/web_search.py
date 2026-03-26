@@ -38,13 +38,22 @@ async def web_search(query: str, max_results: int = 5) -> str:
                 results.append(f"{title}\n{url}\n{desc}")
 
             if not results:
-                logger.info("no results", extra={"event": "search_done", "query": query, "hits": 0})
+                logger.info(
+                    "no results",
+                    extra={"event": "search_done", "query": query, "hits": 0},
+                )
                 return f"No results found for: {query}"
 
-            logger.info("search done", extra={"event": "search_done", "query": query, "hits": len(results)})
+            logger.info(
+                "search done",
+                extra={"event": "search_done", "query": query, "hits": len(results)},
+            )
             return "\n\n".join(results)
         except Exception as e:
-            logger.error("search failed", extra={"event": "search_error", "query": query, "error": str(e)})
+            logger.error(
+                "search failed",
+                extra={"event": "search_error", "query": query, "error": str(e)},
+            )
             return f"Search error: {e}"
 
 

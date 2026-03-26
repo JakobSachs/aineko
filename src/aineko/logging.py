@@ -17,9 +17,23 @@ class StructuredFormatter(logging.Formatter):
             "msg": record.getMessage(),
         }
         # Merge extra fields set via logger.info("...", extra={...})
-        for key in ("event", "room", "sender", "tool", "tool_args", "result_len",
-                     "model", "tokens", "duration_ms", "query", "hits", "error",
-                     "content", "body", "result_preview"):
+        for key in (
+            "event",
+            "room",
+            "sender",
+            "tool",
+            "tool_args",
+            "result_len",
+            "model",
+            "tokens",
+            "duration_ms",
+            "query",
+            "hits",
+            "error",
+            "content",
+            "body",
+            "result_preview",
+        ):
             val = getattr(record, key, None)
             if val is not None:
                 entry[key] = val

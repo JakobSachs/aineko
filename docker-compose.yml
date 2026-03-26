@@ -3,11 +3,8 @@ services:
     build: .
     restart: unless-stopped
     volumes:
-      - aineko-data:/data
+      - ./data:/data
     ports:
       - "8080:8080"
     env_file:
       - .env
-
-volumes:
-  aineko-data:

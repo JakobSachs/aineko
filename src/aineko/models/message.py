@@ -27,7 +27,9 @@ class Session(Base):
     )
 
     messages: Mapped[list["Message"]] = relationship(
-        back_populates="session", order_by="Message.created_at", cascade="all, delete-orphan"
+        back_populates="session",
+        order_by="Message.created_at",
+        cascade="all, delete-orphan",
     )
 
 

@@ -37,7 +37,9 @@ class CronJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     runs: Mapped[list["CronRun"]] = relationship(
-        back_populates="job", order_by="CronRun.started_at.desc()", cascade="all, delete-orphan"
+        back_populates="job",
+        order_by="CronRun.started_at.desc()",
+        cascade="all, delete-orphan",
     )
 
 

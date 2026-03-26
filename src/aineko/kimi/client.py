@@ -65,13 +65,21 @@ class KimiClient:
         for attempt in range(max_retries + 1):
             resp = await self._http.post("/chat/completions", json=payload)
             if resp.status_code in retryable and attempt < max_retries:
-                delay = 2 ** attempt  # 1s, 2s, 4s
-                logger.warning("LLM API %d, retrying in %ds (attempt %d/%d)", resp.status_code, delay, attempt + 1, max_retries)
+                delay = 2**attempt  # 1s, 2s, 4s
+                logger.warning(
+                    "LLM API %d, retrying in %ds (attempt %d/%d)",
+                    resp.status_code,
+                    delay,
+                    attempt + 1,
+                    max_retries,
+                )
                 await asyncio.sleep(delay)
                 continue
             break
         if resp.status_code >= 400:
-            logger.error("llm api error", extra={"event": "llm_error", "error": resp.text})
+            logger.error(
+                "llm api error", extra={"event": "llm_error", "error": resp.text}
+            )
         resp.raise_for_status()
         data = resp.json()
 
@@ -86,12 +94,15 @@ class KimiClient:
             usage=usage,
         )
 
-        logger.info("llm response", extra={
-            "event": "llm_response",
-            "model": self._settings.model,
-            "tokens": usage.get("total_tokens"),
-            "content": (result.content or "")[:300],
-        })
+        logger.info(
+            "llm response",
+            extra={
+                "event": "llm_response",
+                "model": self._settings.model,
+                "tokens": usage.get("total_tokens"),
+                "content": (result.content or "")[:300],
+            },
+        )
 
         # Parse tool calls if present
         for tc in msg.get("tool_calls", []):
@@ -118,6 +129,17 @@ class KimiClient:
             if not response.tool_calls:
                 return response
 
+            # Send intermediate content as a progress update if model produced text alongside tool calls
+            if response.content and tools.get("send_message"):
+                logger.info(
+                    "sending intermediate content",
+                    extra={
+                        "event": "intermediate_msg",
+                        "content": response.content[:200],
+                    },
+                )
+                await tools.call("send_message", {"message": response.content})
+
             # Append assistant message with tool calls (preserve reasoning_content for APIs that require it)
             assistant_msg: dict[str, Any] = {
                 "role": "assistant",
@@ -126,7 +148,10 @@ class KimiClient:
                     {
                         "id": tc.id,
                         "type": "function",
-                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments),
+                        },
                     }
                     for tc in response.tool_calls
                 ],
@@ -137,26 +162,41 @@ class KimiClient:
 
             # Execute each tool call and append results
             for tc in response.tool_calls:
-                logger.info("tool call", extra={
-                    "event": "tool_call",
-                    "tool": tc.name,
-                    "tool_args": tc.arguments,
-                })
+                logger.info(
+                    "tool call",
+                    extra={
+                        "event": "tool_call",
+                        "tool": tc.name,
+                        "tool_args": tc.arguments,
+                    },
+                )
                 result = await tools.call(tc.name, tc.arguments)
-                logger.info("tool result", extra={
-                    "event": "tool_result",
-                    "tool": tc.name,
-                    "result_len": len(result),
-                    "result_preview": result[:200],
-                })
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
-                })
+                logger.info(
+                    "tool result",
+                    extra={
+                        "event": "tool_result",
+                        "tool": tc.name,
+                        "result_len": len(result),
+                        "result_preview": result[:200],
+                    },
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    }
+                )
 
-        logger.warning("Agent hit max tool call rounds (%d)", max_rounds)
-        return response
+        # Hit max rounds — force a final response without tools
+        logger.warning("hit max tool rounds (%d), forcing final response", max_rounds)
+        messages.append(
+            {
+                "role": "user",
+                "content": "You've reached the tool call limit. Summarize what you've done so far and respond to the user now. Do not call any more tools.",
+            }
+        )
+        return await self.chat(messages, tools=None)
 
     async def close(self) -> None:
         await self._http.aclose()

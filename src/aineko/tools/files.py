@@ -19,27 +19,88 @@ def _resolve_path(path: str) -> Path:
     return resolved
 
 
+BINARY_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".bmp",
+    ".ico",
+    ".webp",
+    ".svg",
+    ".pdf",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".xz",
+    ".7z",
+    ".rar",
+    ".mp3",
+    ".mp4",
+    ".wav",
+    ".flac",
+    ".ogg",
+    ".avi",
+    ".mkv",
+    ".mov",
+    ".exe",
+    ".bin",
+    ".so",
+    ".dll",
+    ".o",
+    ".pyc",
+    ".whl",
+    ".db",
+    ".sqlite",
+    ".sqlite3",
+}
+
+
 async def read_file(path: str, offset: int = 0, limit: int = 0) -> str:
     """Read a file with optional line offset and limit."""
     try:
         resolved = _resolve_path(path)
+
+        # Refuse to read binary files as text
+        if resolved.suffix.lower() in BINARY_EXTENSIONS:
+            size = resolved.stat().st_size
+            return f"Binary file: {path} ({size} bytes, type: {resolved.suffix}). Use bash to inspect (e.g. file, hexdump, pdftotext)."
+
         content = resolved.read_text(errors="replace")
+
+        # Detect binary content (high ratio of non-printable chars)
+        if len(content) > 100:
+            sample = content[:1000]
+            non_printable = sum(
+                1 for c in sample if not c.isprintable() and c not in "\n\r\t"
+            )
+            if non_printable / len(sample) > 0.1:
+                return (
+                    f"Binary file: {path} ({len(content)} bytes). Use bash to inspect."
+                )
+
         lines = content.splitlines(keepends=True)
 
         if offset > 0:
-            lines = lines[offset - 1:]  # 1-based
+            lines = lines[offset - 1 :]  # 1-based
         if limit > 0:
             lines = lines[:limit]
 
         result = "".join(lines)
         if len(result) > MAX_READ:
-            result = result[:MAX_READ] + f"\n... (truncated, {len(content)} total chars)"
+            result = (
+                result[:MAX_READ] + f"\n... (truncated, {len(content)} total chars)"
+            )
 
-        logger.info("read file", extra={
-            "event": "file_read",
-            "tool": "read_file",
-            "result_len": len(result),
-        })
+        logger.info(
+            "read file",
+            extra={
+                "event": "file_read",
+                "tool": "read_file",
+                "result_len": len(result),
+            },
+        )
         return result
     except Exception as e:
         return f"Error: {e}"
@@ -51,11 +112,14 @@ async def write_file(path: str, content: str) -> str:
         resolved = _resolve_path(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(content)
-        logger.info("wrote file", extra={
-            "event": "file_write",
-            "tool": "write_file",
-            "result_len": len(content),
-        })
+        logger.info(
+            "wrote file",
+            extra={
+                "event": "file_write",
+                "tool": "write_file",
+                "result_len": len(content),
+            },
+        )
         return f"Wrote {len(content)} chars to {resolved}"
     except Exception as e:
         return f"Error: {e}"
@@ -81,12 +145,17 @@ async def edit_file(path: str, old_text: str, new_text: str) -> str:
         new_content = content.replace(old_text, new_text, 1)
         resolved.write_text(new_content)
 
-        logger.info("edited file", extra={
-            "event": "file_edit",
-            "tool": "edit_file",
-            "result_len": len(new_content),
-        })
-        return f"Edited {path}: replaced {len(old_text)} chars with {len(new_text)} chars"
+        logger.info(
+            "edited file",
+            extra={
+                "event": "file_edit",
+                "tool": "edit_file",
+                "result_len": len(new_content),
+            },
+        )
+        return (
+            f"Edited {path}: replaced {len(old_text)} chars with {len(new_text)} chars"
+        )
     except Exception as e:
         return f"Error: {e}"
 
@@ -98,8 +167,14 @@ read_file_tool = ToolDef(
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "File path relative to /data"},
-            "offset": {"type": "integer", "description": "Start reading from this line number (1-based, optional)"},
-            "limit": {"type": "integer", "description": "Max number of lines to read (optional, 0 = all)"},
+            "offset": {
+                "type": "integer",
+                "description": "Start reading from this line number (1-based, optional)",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max number of lines to read (optional, 0 = all)",
+            },
         },
         "required": ["path"],
     },
@@ -127,8 +202,14 @@ edit_file_tool = ToolDef(
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "File path relative to /data"},
-            "old_text": {"type": "string", "description": "Exact text to find (must appear exactly once)"},
-            "new_text": {"type": "string", "description": "Replacement text (can be empty to delete)"},
+            "old_text": {
+                "type": "string",
+                "description": "Exact text to find (must appear exactly once)",
+            },
+            "new_text": {
+                "type": "string",
+                "description": "Replacement text (can be empty to delete)",
+            },
         },
         "required": ["path", "old_text", "new_text"],
     },

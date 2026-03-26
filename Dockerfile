@@ -23,12 +23,6 @@ COPY alembic.ini ./
 # Install the project itself
 RUN uv sync --no-dev
 
-# Create data directory, copy bundled defaults
-RUN mkdir -p /data/skills /data/memory
-COPY data/skills/ /data/skills/
-COPY data/soul.md /data/soul.md
-COPY data/memory/ /data/memory/
-
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --retries=3 \

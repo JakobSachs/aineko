@@ -40,14 +40,19 @@ class CronScheduler:
         match job.schedule_kind:
             case ScheduleKind.CRON:
                 from apscheduler.triggers.cron import CronTrigger
+
                 trigger = CronTrigger.from_crontab(job.schedule_expr)
             case ScheduleKind.EVERY:
                 from apscheduler.triggers.interval import IntervalTrigger
+
                 trigger = IntervalTrigger(**_parse_interval(job.schedule_expr))
             case ScheduleKind.AT:
                 from apscheduler.triggers.date import DateTrigger
                 from datetime import datetime
-                trigger = DateTrigger(run_date=datetime.fromisoformat(job.schedule_expr))
+
+                trigger = DateTrigger(
+                    run_date=datetime.fromisoformat(job.schedule_expr)
+                )
 
         self._scheduler.add_job(
             self._run_job,

@@ -12,8 +12,12 @@ wheels/
 # Secrets
 .env
 
-# Data
-/data/
+# Runtime data (not tracked)
+data/aineko.db
+data/aineko.db-*
+data/crypto_store/
+data/memory.md
 
-# SQLite databases
-*.db
+# Coverage
+.coverage
+htmlcov/

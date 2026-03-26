@@ -18,7 +18,9 @@ async def run_bash(command: str, timeout: int = 60) -> str:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = stdout.decode(errors="replace")
         if len(output) > MAX_OUTPUT:
-            output = output[:MAX_OUTPUT] + f"\n... (truncated, {len(output)} total chars)"
+            output = (
+                output[:MAX_OUTPUT] + f"\n... (truncated, {len(output)} total chars)"
+            )
         exit_info = f"\n[exit code: {proc.returncode}]"
         return output + exit_info
     except asyncio.TimeoutError:

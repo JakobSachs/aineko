@@ -6,11 +6,7 @@ was skipped. The fix: always auto-send the final response regardless of whether
 send_message was called during the loop.
 """
 
-import asyncio
-
 import pytest
-
-from aineko.tools.registry import ToolDef, ToolRegistry
 
 
 # Minimal reproduction of the delivery logic from app.py handle_message
@@ -71,7 +67,9 @@ async def test_final_response_sent_even_after_send_message_tool():
     )
 
     assert result["sent_via_tool"] == ["looking into it"]
-    assert result["auto_sent"] == ["here are the results: fungi connect trees underground"]
+    assert result["auto_sent"] == [
+        "here are the results: fungi connect trees underground"
+    ]
     assert "looking into it" in result["saved_history"]
     assert "fungi connect trees" in result["saved_history"]
 
@@ -108,7 +106,12 @@ async def test_multiple_progress_updates_plus_final():
     result = await simulate_delivery(
         tool_calls_sequence=[
             [{"name": "send_message", "args": {"message": "searching..."}}],
-            [{"name": "send_message", "args": {"message": "found 5 results, analyzing"}}],
+            [
+                {
+                    "name": "send_message",
+                    "args": {"message": "found 5 results, analyzing"},
+                }
+            ],
         ],
         final_content="here is the summary",
     )

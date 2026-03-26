@@ -21,7 +21,9 @@ def init_engine(database_url: str) -> None:
 
 
 async def get_session() -> AsyncGenerator[AsyncSession]:
-    assert async_session_factory is not None, "Database not initialized — call init_engine first"
+    assert async_session_factory is not None, (
+        "Database not initialized — call init_engine first"
+    )
     async with async_session_factory() as session:
         yield session
 

@@ -5,6 +5,7 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -91,14 +92,21 @@ async def handle_message(
     # Handle /reset command
     if msg.body.strip().lower() in ("/reset", "/clear", "/forget"):
         async for db in get_session():
-            result = await db.execute(select(Session).where(Session.room_id == msg.room_id))
+            result = await db.execute(
+                select(Session).where(Session.room_id == msg.room_id)
+            )
             session = result.scalar_one_or_none()
             if session:
                 await db.execute(
-                    select(Message).where(Message.session_id == session.id).with_for_update()
+                    select(Message)
+                    .where(Message.session_id == session.id)
+                    .with_for_update()
                 )
                 from sqlalchemy import delete
-                await db.execute(delete(Message).where(Message.session_id == session.id))
+
+                await db.execute(
+                    delete(Message).where(Message.session_id == session.id)
+                )
                 await db.commit()
             await matrix.send_message(msg.room_id, "conversation cleared, fresh start")
         return
@@ -116,25 +124,27 @@ async def handle_message(
     request_tools = ToolRegistry()
     for tool_def in tools._tools.values():
         request_tools.register(tool_def)
-    request_tools.register(ToolDef(
-        name="send_message",
-        description="Send a message to the user. Call this to reply — your response text is NOT automatically sent. Use this for every message you want the user to see.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "The message text to send.",
+    request_tools.register(
+        ToolDef(
+            name="send_message",
+            description="Send a message to the user. Call this to reply — your response text is NOT automatically sent. Use this for every message you want the user to see.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "The message text to send.",
+                    },
+                    "room": {
+                        "type": "string",
+                        "description": "Room ID to send to (defaults to current room).",
+                    },
                 },
-                "room": {
-                    "type": "string",
-                    "description": "Room ID to send to (defaults to current room).",
-                },
+                "required": ["message"],
             },
-            "required": ["message"],
-        },
-        handler=_send_message_tool,
-    ))
+            handler=_send_message_tool,
+        )
+    )
 
     async for db in get_session():
         # Get or create session for this room
@@ -146,11 +156,13 @@ async def handle_message(
             await db.flush()
 
         # Save incoming message
-        db.add(Message(
-            session_id=session.id,
-            role=Role.USER,
-            content=msg.body,
-        ))
+        db.add(
+            Message(
+                session_id=session.id,
+                role=Role.USER,
+                content=msg.body,
+            )
+        )
         await db.flush()
 
         # Load conversation history
@@ -162,9 +174,27 @@ async def handle_message(
         history = result.scalars().all()
 
         # Build messages for Kimi
-        messages = [{"role": "system", "content": build_system_prompt(skills, soul_path, memory_dir)}]
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": build_system_prompt(skills, soul_path, memory_dir),
+            }
+        ]
         for m in history:
             messages.append({"role": m.role.value, "content": m.content})
+
+        # If current message has an image, make the last user message multimodal
+        if msg.image_b64 and msg.image_mime:
+            last_user = messages[-1]
+            last_user["content"] = [
+                {"type": "text", "text": last_user["content"]},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{msg.image_mime};base64,{msg.image_b64}"
+                    },
+                },
+            ]
 
         # Trim to fit context window
         messages = trim_messages(messages, max_context_tokens)
@@ -182,12 +212,14 @@ async def handle_message(
             all_visible.append(response.content)
         visible = "\n".join(all_visible) if all_visible else ""
         if visible:
-            db.add(Message(
-                session_id=session.id,
-                role=Role.ASSISTANT,
-                content=visible,
-                token_count=response.usage.get("total_tokens"),
-            ))
+            db.add(
+                Message(
+                    session_id=session.id,
+                    role=Role.ASSISTANT,
+                    content=visible,
+                    token_count=response.usage.get("total_tokens"),
+                )
+            )
         await db.commit()
 
 
@@ -220,17 +252,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     setup_script = settings.data_dir / "setup.sh"
     if setup_script.exists():
         import subprocess
+
         logger.info("Running /data/setup.sh...")
-        result = subprocess.run(["sh", str(setup_script)], capture_output=True, text=True, timeout=120)
+        result = subprocess.run(
+            ["sh", str(setup_script)], capture_output=True, text=True, timeout=120
+        )
         if result.returncode == 0:
             logger.info("setup.sh completed successfully")
         else:
-            logger.warning("setup.sh failed (exit %d): %s", result.returncode, result.stderr[:500])
+            logger.warning(
+                "setup.sh failed (exit %d): %s", result.returncode, result.stderr[:500]
+            )
     max_ctx = settings.kimi.max_context_tokens
 
     # Matrix
-    matrix = MatrixConnector(settings.matrix, store_path=settings.data_dir / "crypto_store")
-    matrix.on_message(lambda msg: handle_message(msg, kimi, tools, skills, matrix, soul_path, memory_dir, max_ctx))
+    matrix = MatrixConnector(
+        settings.matrix, store_path=settings.data_dir / "crypto_store"
+    )
+    matrix.on_message(
+        lambda msg: handle_message(
+            msg, kimi, tools, skills, matrix, soul_path, memory_dir, max_ctx
+        )
+    )
 
     # Cron
     cron = CronScheduler()
@@ -318,6 +361,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings = Settings()
 
     from aineko.logging import setup_logging
+
     setup_logging(settings.log_level)
 
     app = FastAPI(title="aineko", version="0.1.0", lifespan=lifespan)

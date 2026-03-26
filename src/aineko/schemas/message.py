@@ -38,3 +38,5 @@ class IncomingMessage(BaseModel):
     body: str
     timestamp: datetime
     event_id: str
+    image_b64: str | None = None  # base64-encoded image data for vision
+    image_mime: str | None = None  # e.g. "image/png"

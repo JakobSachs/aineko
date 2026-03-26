@@ -1,6 +1,5 @@
 """Happy path test for Brave web search tool."""
 
-import httpx
 import pytest
 
 from aineko.tools import web_search as web_search_mod

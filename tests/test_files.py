@@ -9,11 +9,13 @@ from aineko.tools.files import read_file, write_file, edit_file
 def data_dir(tmp_path, monkeypatch):
     """Point DATA_ROOT at a temp directory."""
     import aineko.tools.files as mod
+
     monkeypatch.setattr(mod, "DATA_ROOT", tmp_path)
     return tmp_path
 
 
 # --- read_file ---
+
 
 @pytest.mark.asyncio
 async def test_read_file(data_dir):
@@ -55,6 +57,7 @@ async def test_read_file_not_found(data_dir):
 
 # --- write_file ---
 
+
 @pytest.mark.asyncio
 async def test_write_file(data_dir):
     result = await write_file("new.txt", "hello world")
@@ -70,6 +73,7 @@ async def test_write_file_creates_dirs(data_dir):
 
 
 # --- edit_file ---
+
 
 @pytest.mark.asyncio
 async def test_edit_file_replaces_text(data_dir):
@@ -114,12 +118,34 @@ async def test_edit_file_ambiguous_match(data_dir):
 @pytest.mark.asyncio
 async def test_edit_file_multiline(data_dir):
     (data_dir / "doc.md").write_text("start\nold line 1\nold line 2\nend\n")
-    result = await edit_file("doc.md", "old line 1\nold line 2", "new line 1\nnew line 2\nnew line 3")
+    result = await edit_file(
+        "doc.md", "old line 1\nold line 2", "new line 1\nnew line 2\nnew line 3"
+    )
     assert "Edited" in result
-    assert (data_dir / "doc.md").read_text() == "start\nnew line 1\nnew line 2\nnew line 3\nend\n"
+    assert (
+        data_dir / "doc.md"
+    ).read_text() == "start\nnew line 1\nnew line 2\nnew line 3\nend\n"
 
 
 # --- path traversal ---
+
+
+@pytest.mark.asyncio
+async def test_read_binary_by_extension(data_dir):
+    """Binary files detected by extension return info, not content."""
+    (data_dir / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    result = await read_file("image.png")
+    assert "Binary file" in result
+    assert "png" in result
+
+
+@pytest.mark.asyncio
+async def test_read_binary_by_content(data_dir):
+    """Files with lots of non-printable chars detected as binary."""
+    (data_dir / "mystery.dat").write_bytes(bytes(range(256)) * 10)
+    result = await read_file("mystery.dat")
+    assert "Binary file" in result
+
 
 @pytest.mark.asyncio
 async def test_read_blocks_traversal(data_dir):

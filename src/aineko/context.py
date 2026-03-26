@@ -44,7 +44,12 @@ def trim_messages(
 
     dropped = len(conversation) - len(kept)
     if dropped > 0:
-        logger.info("Context: trimmed %d old messages (%d kept, ~%d tokens)", dropped, len(kept), used)
+        logger.info(
+            "Context: trimmed %d old messages (%d kept, ~%d tokens)",
+            dropped,
+            len(kept),
+            used,
+        )
 
     result = []
     if system_msg:
