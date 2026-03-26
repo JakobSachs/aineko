@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     log_level: str = "info"
     database_url: str = ""  # default built from data_dir in property
 
+    brave_api_key: str = ""  # Brave Search API key
+
     matrix: MatrixSettings = Field(default_factory=MatrixSettings)
     kimi: KimiSettings = Field(default_factory=KimiSettings)
     heartbeat: HeartbeatSettings = Field(default_factory=HeartbeatSettings)

@@ -71,19 +71,27 @@ class KimiClient:
                 continue
             break
         if resp.status_code >= 400:
-            logger.error("LLM API error %d: %s", resp.status_code, resp.text)
+            logger.error("llm api error", extra={"event": "llm_error", "error": resp.text})
         resp.raise_for_status()
         data = resp.json()
 
         choice = data["choices"][0]
         msg = choice["message"]
+        usage = data.get("usage", {})
 
         result = ChatResponse(
             content=msg.get("content", "") or "",
             reasoning_content=msg.get("reasoning_content"),
             finish_reason=choice.get("finish_reason", ""),
-            usage=data.get("usage", {}),
+            usage=usage,
         )
+
+        logger.info("llm response", extra={
+            "event": "llm_response",
+            "model": self._settings.model,
+            "tokens": usage.get("total_tokens"),
+            "content": (result.content or "")[:300],
+        })
 
         # Parse tool calls if present
         for tc in msg.get("tool_calls", []):
@@ -101,7 +109,7 @@ class KimiClient:
         self,
         messages: list[dict[str, Any]],
         tools: ToolRegistry,
-        max_rounds: int = 10,
+        max_rounds: int = 25,
     ) -> ChatResponse:
         """Run the chat → tool call → chat loop until the agent produces a final response."""
         for _ in range(max_rounds):
@@ -129,8 +137,18 @@ class KimiClient:
 
             # Execute each tool call and append results
             for tc in response.tool_calls:
-                logger.info("Tool call: %s(%s)", tc.name, tc.arguments)
+                logger.info("tool call", extra={
+                    "event": "tool_call",
+                    "tool": tc.name,
+                    "tool_args": tc.arguments,
+                })
                 result = await tools.call(tc.name, tc.arguments)
+                logger.info("tool result", extra={
+                    "event": "tool_result",
+                    "tool": tc.name,
+                    "result_len": len(result),
+                    "result_preview": result[:200],
+                })
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,

@@ -157,6 +157,11 @@ class MatrixConnector:
 
     async def send_message(self, room_id: str, body: str) -> None:
         """Send a text message to a Matrix room (auto-encrypted if room has E2EE)."""
+        logger.info("message sent", extra={
+            "event": "msg_out",
+            "room": room_id,
+            "body": body[:500],
+        })
         chunks = _chunk_message(body, max_len=4096)
         for chunk in chunks:
             await self._client.room_send(
@@ -199,6 +204,11 @@ class MatrixConnector:
 
     async def _on_room_message(self, room: MatrixRoom, event: RoomMessageText) -> None:
         if event.sender == self._settings.user_id:
+            logger.debug("Ignoring own message in %s", room.room_id)
+            return
+        # Also ignore messages from the client's resolved user_id (in case settings differ)
+        if event.sender == self._client.user_id:
+            logger.debug("Ignoring own message (client user_id) in %s", room.room_id)
             return
 
         if self._settings.room_list and room.room_id not in self._settings.room_list:
@@ -217,7 +227,12 @@ class MatrixConnector:
             timestamp=datetime.fromtimestamp(event.server_timestamp / 1000, tz=timezone.utc),
             event_id=event.event_id,
         )
-        logger.info("Matrix: message from %s in %s", msg.sender, msg.room_id)
+        logger.info("message received", extra={
+            "event": "msg_in",
+            "sender": msg.sender,
+            "room": msg.room_id,
+            "body": msg.body,
+        })
 
         try:
             await self._handler(msg)

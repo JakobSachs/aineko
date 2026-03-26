@@ -21,9 +21,10 @@ from aineko.skills.engine import SkillsEngine
 from aineko.cron.runner import run_cron_job
 from aineko.tools.bash import bash_tool
 from aineko.tools.create_skill import create_skill_tool
-from aineko.tools.files import read_file_tool, write_file_tool
-from aineko.tools.registry import ToolRegistry
+from aineko.tools.files import edit_file_tool, read_file_tool, write_file_tool
+from aineko.tools.registry import ToolDef, ToolRegistry
 from aineko.tools.memory import memory_recall_tool
+from aineko.tools import web_search as web_search_mod
 from aineko.tools.web_search import web_search_tool
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ def build_tools() -> ToolRegistry:
     registry.register(bash_tool)
     registry.register(read_file_tool)
     registry.register(write_file_tool)
+    registry.register(edit_file_tool)
     registry.register(web_search_tool)
     registry.register(create_skill_tool)
     registry.register(memory_recall_tool)
@@ -86,6 +88,54 @@ async def handle_message(
 
     from aineko.models.message import Message, Role, Session
 
+    # Handle /reset command
+    if msg.body.strip().lower() in ("/reset", "/clear", "/forget"):
+        async for db in get_session():
+            result = await db.execute(select(Session).where(Session.room_id == msg.room_id))
+            session = result.scalar_one_or_none()
+            if session:
+                await db.execute(
+                    select(Message).where(Message.session_id == session.id).with_for_update()
+                )
+                from sqlalchemy import delete
+                await db.execute(delete(Message).where(Message.session_id == session.id))
+                await db.commit()
+            await matrix.send_message(msg.room_id, "conversation cleared, fresh start")
+        return
+
+    # Track messages sent via the send_message tool
+    sent_messages: list[str] = []
+
+    async def _send_message_tool(message: str, room: str = "") -> str:
+        target_room = room or msg.room_id
+        sent_messages.append(message)
+        await matrix.send_message(target_room, message)
+        return "sent"
+
+    # Build per-request tools with send_message bound to this context
+    request_tools = ToolRegistry()
+    for tool_def in tools._tools.values():
+        request_tools.register(tool_def)
+    request_tools.register(ToolDef(
+        name="send_message",
+        description="Send a message to the user. Call this to reply — your response text is NOT automatically sent. Use this for every message you want the user to see.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The message text to send.",
+                },
+                "room": {
+                    "type": "string",
+                    "description": "Room ID to send to (defaults to current room).",
+                },
+            },
+            "required": ["message"],
+        },
+        handler=_send_message_tool,
+    ))
+
     async for db in get_session():
         # Get or create session for this room
         result = await db.execute(select(Session).where(Session.room_id == msg.room_id))
@@ -120,24 +170,25 @@ async def handle_message(
         messages = trim_messages(messages, max_context_tokens)
 
         # Run agent loop
-        response = await kimi.chat_loop(messages, tools)
+        response = await kimi.chat_loop(messages, request_tools)
 
-        # Save assistant response
-        db.add(Message(
-            session_id=session.id,
-            role=Role.ASSISTANT,
-            content=response.content,
-            token_count=response.usage.get("total_tokens"),
-        ))
-        await db.commit()
-
-        # Send to Matrix — split on --- separators for natural chat feel
+        # Auto-send final response if model has text content
         if response.content:
-            parts = [p.strip() for p in response.content.split("\n---\n") if p.strip()]
-            for part in parts:
-                await matrix.send_message(msg.room_id, part)
-                if len(parts) > 1:
-                    await asyncio.sleep(0.6)
+            await matrix.send_message(msg.room_id, response.content)
+
+        # Save what the user saw as the assistant message
+        all_visible = sent_messages.copy()
+        if response.content:
+            all_visible.append(response.content)
+        visible = "\n".join(all_visible) if all_visible else ""
+        if visible:
+            db.add(Message(
+                session_id=session.id,
+                role=Role.ASSISTANT,
+                content=visible,
+                token_count=response.usage.get("total_tokens"),
+            ))
+        await db.commit()
 
 
 @asynccontextmanager
@@ -155,6 +206,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Tools
     tools = build_tools()
+    web_search_mod.brave_api_key = settings.brave_api_key
 
     # Kimi
     kimi = KimiClient(settings.kimi)
@@ -163,6 +215,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     soul_path = settings.data_dir / "soul.md"
     memory_dir = settings.data_dir / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
+
+    # Run persistent setup script if it exists
+    setup_script = settings.data_dir / "setup.sh"
+    if setup_script.exists():
+        import subprocess
+        logger.info("Running /data/setup.sh...")
+        result = subprocess.run(["sh", str(setup_script)], capture_output=True, text=True, timeout=120)
+        if result.returncode == 0:
+            logger.info("setup.sh completed successfully")
+        else:
+            logger.warning("setup.sh failed (exit %d): %s", result.returncode, result.stderr[:500])
     max_ctx = settings.kimi.max_context_tokens
 
     # Matrix
@@ -254,10 +317,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = Settings()
 
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level.upper()),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
+    from aineko.logging import setup_logging
+    setup_logging(settings.log_level)
 
     app = FastAPI(title="aineko", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings

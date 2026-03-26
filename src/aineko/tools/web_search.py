@@ -1,53 +1,63 @@
-"""Web search tool via DuckDuckGo (no API key needed)."""
+"""Web search tool via Brave Search API."""
+
+import logging
 
 import httpx
 
 from aineko.tools.registry import ToolDef
 
-DDG_URL = "https://api.duckduckgo.com/"
+logger = logging.getLogger(__name__)
+
+BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
+
+# Loaded once at import; overridden by app.py before tools are used
+brave_api_key: str = ""
 
 
 async def web_search(query: str, max_results: int = 5) -> str:
+    if not brave_api_key:
+        logger.warning("brave api key not configured", extra={"event": "search_error"})
+        return "Error: BRAVE_API_KEY not configured"
+
+    logger.info("web search", extra={"event": "search_start", "query": query})
     async with httpx.AsyncClient(timeout=15) as client:
         try:
-            # DuckDuckGo instant answer API
             resp = await client.get(
-                DDG_URL,
-                params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
+                BRAVE_URL,
+                params={"q": query, "count": max_results},
+                headers={"X-Subscription-Token": brave_api_key},
             )
             resp.raise_for_status()
             data = resp.json()
 
             results: list[str] = []
-
-            # Abstract (main answer)
-            if data.get("AbstractText"):
-                results.append(f"**{data.get('AbstractSource', 'Answer')}**: {data['AbstractText']}")
-
-            # Related topics
-            for topic in data.get("RelatedTopics", [])[:max_results]:
-                if "Text" in topic:
-                    url = topic.get("FirstURL", "")
-                    results.append(f"- {topic['Text']}" + (f" ({url})" if url else ""))
+            for item in data.get("web", {}).get("results", [])[:max_results]:
+                title = item.get("title", "")
+                url = item.get("url", "")
+                desc = item.get("description", "")
+                results.append(f"{title}\n{url}\n{desc}")
 
             if not results:
+                logger.info("no results", extra={"event": "search_done", "query": query, "hits": 0})
                 return f"No results found for: {query}"
 
-            return "\n".join(results)
+            logger.info("search done", extra={"event": "search_done", "query": query, "hits": len(results)})
+            return "\n\n".join(results)
         except Exception as e:
+            logger.error("search failed", extra={"event": "search_error", "query": query, "error": str(e)})
             return f"Search error: {e}"
 
 
 web_search_tool = ToolDef(
     name="web_search",
-    description="Search the web via DuckDuckGo. Returns a summary and related topics.",
+    description="Search the web via Brave Search. Returns titles, URLs, and descriptions.",
     parameters={
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "Search query"},
             "max_results": {
                 "type": "integer",
-                "description": "Maximum related topics to return (default 5)",
+                "description": "Maximum results to return (default 5)",
                 "default": 5,
             },
         },
