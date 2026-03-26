@@ -1,6 +1,7 @@
 """Conversation session and message models."""
 
 import enum
+import json as _json
 from datetime import datetime
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
@@ -46,3 +47,32 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     session: Mapped[Session] = relationship(back_populates="messages")
+
+
+class ToolLog(Base):
+    """Log of every tool call made during an agent loop."""
+
+    __tablename__ = "tool_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id"), index=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("messages.id"), index=True)
+    tool_name: Mapped[str] = mapped_column(String, index=True)
+    arguments: Mapped[str] = mapped_column(Text)  # JSON
+    result: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    session: Mapped[Session] = relationship()
+    message: Mapped[Message] = relationship()
+
+    @property
+    def arguments_dict(self) -> dict:
+        return _json.loads(self.arguments) if self.arguments else {}
+
+    def summary(self, result_limit: int = 500) -> str:
+        """One-line summary for search results."""
+        result_preview = self.result[:result_limit] if self.result else ""
+        return (
+            f"[{self.created_at}] {self.tool_name}({self.arguments}) "
+            f"-> {result_preview}"
+        )

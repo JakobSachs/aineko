@@ -125,24 +125,29 @@ class MatrixConnector:
         if not self._client.olm:
             logger.warning("Matrix: olm not initialized, E2EE disabled")
 
-        # Register callbacks
-        self._client.add_event_callback(self._on_room_message, RoomMessageText)
-        self._client.add_event_callback(self._on_room_file, RoomMessageFile)
-        self._client.add_event_callback(self._on_room_file, RoomMessageImage)
+        # Register non-message callbacks before initial sync
         self._client.add_event_callback(self._on_megolm_event, MegolmEvent)
         self._client.add_to_device_callback(self._on_key_request, RoomKeyRequest)
         self._client.add_event_callback(self._on_invite, InviteMemberEvent)
 
-        # Initial sync
+        # Initial sync — get room state without processing messages yet
         logger.info("Matrix: initial sync...")
         resp = await self._client.sync(timeout=10_000, full_state=True)
-        if hasattr(resp, "next_batch"):
-            self._client.next_batch = resp.next_batch
 
         # Auto-join any pending invites
         for room_id in self._client.invited_rooms:
             logger.info("Matrix: auto-joining room %s", room_id)
             await self._client.join(room_id)
+
+        # Find missed messages: scan timeline from initial sync for unprocessed events
+        await self._replay_missed_messages(resp)
+
+        # Now register message callbacks for live messages going forward
+        if hasattr(resp, "next_batch"):
+            self._client.next_batch = resp.next_batch
+        self._client.add_event_callback(self._on_room_message, RoomMessageText)
+        self._client.add_event_callback(self._on_room_file, RoomMessageFile)
+        self._client.add_event_callback(self._on_room_file, RoomMessageImage)
 
         logger.info("Matrix: initial sync done, listening for messages")
 
@@ -187,6 +192,78 @@ class MatrixConnector:
                 message_type="m.room.message",
                 content={"msgtype": "m.text", "body": chunk},
             )
+
+    async def _replay_missed_messages(self, sync_response: Any) -> None:
+        """Check initial sync for messages sent while we were offline."""
+        from datetime import datetime, timezone
+
+        from sqlalchemy import func, select
+
+        from aineko.db import get_session
+        from aineko.models.message import Message, Role, Session
+
+        if not hasattr(sync_response, "rooms") or not sync_response.rooms:
+            return
+        if not hasattr(sync_response.rooms, "join"):
+            return
+
+        rooms_to_check = self._settings.room_list or list(sync_response.rooms.join.keys())
+
+        for room_id in rooms_to_check:
+            room_data = sync_response.rooms.join.get(room_id)
+            if not room_data or not hasattr(room_data, "timeline"):
+                continue
+
+            # Find the timestamp of our last assistant reply in this room
+            last_reply_ts: datetime | None = None
+            async for db in get_session():
+                result = await db.execute(
+                    select(func.max(Message.created_at))
+                    .join(Session)
+                    .where(Session.room_id == room_id)
+                    .where(Message.role == Role.ASSISTANT)
+                )
+                last_reply_ts = result.scalar_one_or_none()
+
+            # Collect user messages from timeline that are newer than our last reply
+            missed = []
+            for event in room_data.timeline.events:
+                if not isinstance(event, RoomMessageText):
+                    continue
+                if event.sender in (self._settings.user_id, self._client.user_id):
+                    continue
+                event_ts = datetime.fromtimestamp(
+                    event.server_timestamp / 1000, tz=timezone.utc
+                )
+                # Skip if we already replied after this message
+                if last_reply_ts and event_ts <= last_reply_ts.replace(tzinfo=timezone.utc):
+                    continue
+                missed.append((event, event_ts))
+
+            if not missed:
+                continue
+
+            logger.info("Matrix: found %d missed message(s) in %s", len(missed), room_id)
+            for event, event_ts in missed:
+                if self._queue is None:
+                    break
+                msg = IncomingMessage(
+                    room_id=room_id,
+                    sender=event.sender,
+                    body=event.body,
+                    timestamp=event_ts,
+                    event_id=event.event_id,
+                )
+                logger.info(
+                    "replaying missed message",
+                    extra={
+                        "event": "msg_replay",
+                        "sender": msg.sender,
+                        "room": room_id,
+                        "body": msg.body[:100],
+                    },
+                )
+                await self._queue.enqueue(msg)
 
     async def _setup_crypto(self) -> None:
         """Set up crypto in background: trust devices, query keys, claim OTKs."""

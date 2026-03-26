@@ -4,6 +4,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./data:/data
+      - ~/Obsidian:/data/vault:ro
     ports:
       - "8080:8080"
     env_file:

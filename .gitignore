@@ -13,10 +13,10 @@ wheels/
 .env
 
 # Runtime data (not tracked)
-data/aineko.db
-data/aineko.db-*
-data/crypto_store/
-data/memory.md
+data/
+
+# External projects
+openclaw/
 
 # Coverage
 .coverage

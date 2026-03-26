@@ -46,7 +46,8 @@ async def test_read_file_with_limit(data_dir):
 async def test_read_file_with_offset_and_limit(data_dir):
     (data_dir / "lines.txt").write_text("a\nb\nc\nd\ne\n")
     result = await read_file("lines.txt", offset=2, limit=2)
-    assert result == "b\nc\n"
+    assert "b\nc\n" in result
+    assert "2 more lines" in result
 
 
 @pytest.mark.asyncio

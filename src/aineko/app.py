@@ -26,6 +26,7 @@ from aineko.tools.files import edit_file_tool, read_file_tool, write_file_tool
 from aineko.tools.registry import ToolDef, ToolRegistry
 from aineko.tools.memory import memory_recall_tool
 from aineko.tools import web_search as web_search_mod
+from aineko.tools.tool_history import search_tool_history_tool
 from aineko.tools.web_search import web_search_tool
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ def build_tools() -> ToolRegistry:
     registry.register(web_search_tool)
     registry.register(create_skill_tool)
     registry.register(memory_recall_tool)
+    registry.register(search_tool_history_tool)
     return registry
 
 
@@ -87,7 +89,7 @@ async def handle_message(
     """Core message handler: load session, run agent, send reply."""
     from sqlalchemy import select
 
-    from aineko.models.message import Message, Role, Session
+    from aineko.models.message import Message, Role, Session, ToolLog
 
     # Handle /reset command
     if msg.body.strip().lower() in ("/reset", "/clear", "/forget"):
@@ -156,13 +158,12 @@ async def handle_message(
             await db.flush()
 
         # Save incoming message
-        db.add(
-            Message(
-                session_id=session.id,
-                role=Role.USER,
-                content=msg.body,
-            )
+        user_msg = Message(
+            session_id=session.id,
+            role=Role.USER,
+            content=msg.body,
         )
+        db.add(user_msg)
         await db.flush()
 
         # Load conversation history
@@ -220,6 +221,19 @@ async def handle_message(
                     token_count=response.usage.get("total_tokens"),
                 )
             )
+
+        # Persist tool call history
+        for rec in response.tool_history:
+            db.add(
+                ToolLog(
+                    session_id=session.id,
+                    message_id=user_msg.id,
+                    tool_name=rec.tool_name,
+                    arguments=rec.arguments,
+                    result=rec.result,
+                )
+            )
+
         await db.commit()
 
 
@@ -331,7 +345,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                             ),
                         },
                     ]
-                    response = await kimi.chat_loop(messages, tools)
+
+                    # Give heartbeat a send_message tool so it can proactively reach out
+                    hb_tools = ToolRegistry()
+                    for tool_def in tools._tools.values():
+                        hb_tools.register(tool_def)
+
+                    async def _hb_send(message: str, room: str = "") -> str:
+                        target = room or heartbeat_room
+                        if target:
+                            await matrix.send_message(target, message)
+                        return "sent"
+
+                    hb_tools.register(
+                        ToolDef(
+                            name="send_message",
+                            description="Send a message to the user.",
+                            parameters={
+                                "type": "object",
+                                "properties": {
+                                    "message": {
+                                        "type": "string",
+                                        "description": "The message text to send.",
+                                    },
+                                    "room": {
+                                        "type": "string",
+                                        "description": "Room ID (defaults to heartbeat room).",
+                                    },
+                                },
+                                "required": ["message"],
+                            },
+                            handler=_hb_send,
+                        )
+                    )
+
+                    response = await kimi.chat_loop(messages, hb_tools)
 
                     if response.content and heartbeat.should_deliver(response.content):
                         if heartbeat_room:

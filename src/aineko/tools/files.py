@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 DATA_ROOT = Path("/data")
 MAX_READ = 50_000  # chars
+DEFAULT_LINE_LIMIT = 200
 
 
 def _resolve_path(path: str) -> Path:
@@ -82,12 +83,18 @@ async def read_file(path: str, offset: int = 0, limit: int = 0) -> str:
 
         lines = content.splitlines(keepends=True)
 
+        total_lines = len(lines)
+
         if offset > 0:
             lines = lines[offset - 1 :]  # 1-based
-        if limit > 0:
-            lines = lines[:limit]
+        after_offset = len(lines)
+        effective_limit = limit if limit > 0 else DEFAULT_LINE_LIMIT
+        lines = lines[:effective_limit]
 
         result = "".join(lines)
+        remaining = after_offset - len(lines)
+        if remaining > 0:
+            result += f"\n... ({remaining} more lines, {total_lines} total. Use offset/limit to read more.)"
         if len(result) > MAX_READ:
             result = (
                 result[:MAX_READ] + f"\n... (truncated, {len(content)} total chars)"
@@ -173,7 +180,7 @@ read_file_tool = ToolDef(
             },
             "limit": {
                 "type": "integer",
-                "description": "Max number of lines to read (optional, 0 = all)",
+                "description": "Max lines to read (default 200, use higher value for more)",
             },
         },
         "required": ["path"],

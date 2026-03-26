@@ -22,12 +22,21 @@ class ToolCall:
 
 
 @dataclass
+class ToolCallRecord:
+    """Record of a tool call + result for persistence."""
+    tool_name: str
+    arguments: str  # JSON string
+    result: str
+
+
+@dataclass
 class ChatResponse:
     content: str = ""
     reasoning_content: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
     finish_reason: str = ""
+    tool_history: list[ToolCallRecord] = field(default_factory=list)
 
 
 class KimiClient:
@@ -123,10 +132,13 @@ class KimiClient:
         max_rounds: int = 25,
     ) -> ChatResponse:
         """Run the chat → tool call → chat loop until the agent produces a final response."""
+        tool_history: list[ToolCallRecord] = []
+
         for _ in range(max_rounds):
             response = await self.chat(messages, tools)
 
             if not response.tool_calls:
+                response.tool_history = tool_history
                 return response
 
             # Send intermediate content as a progress update if model produced text alongside tool calls
@@ -171,6 +183,11 @@ class KimiClient:
                     },
                 )
                 result = await tools.call(tc.name, tc.arguments)
+                tool_history.append(ToolCallRecord(
+                    tool_name=tc.name,
+                    arguments=json.dumps(tc.arguments),
+                    result=result,
+                ))
                 logger.info(
                     "tool result",
                     extra={
@@ -196,7 +213,9 @@ class KimiClient:
                 "content": "You've reached the tool call limit. Summarize what you've done so far and respond to the user now. Do not call any more tools.",
             }
         )
-        return await self.chat(messages, tools=None)
+        final = await self.chat(messages, tools=None)
+        final.tool_history = tool_history
+        return final
 
     async def close(self) -> None:
         await self._http.aclose()
