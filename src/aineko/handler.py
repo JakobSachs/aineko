@@ -106,7 +106,10 @@ async def load_conversation(
                 messages.append({"role": "assistant", "content": blocks})
             except json.JSONDecodeError:
                 messages.append(
-                    {"role": "assistant", "content": [{"type": "text", "text": m.content}]}
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": m.content}],
+                    }
                 )
         elif m.role == Role.TOOL and m.tool_name == "__tool_results__":
             try:

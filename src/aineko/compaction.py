@@ -79,7 +79,7 @@ async def compact_messages(
     messages: list[dict[str, Any]],
     kimi_client: Any,
     keep_recent: int = 4,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str | None]:
     """Compact old messages into a summary, keeping recent ones intact.
 
     Args:
@@ -88,10 +88,11 @@ async def compact_messages(
         keep_recent: Number of recent conversation messages to preserve
 
     Returns:
-        Compacted message list: [system, summary, ...recent_messages]
+        (compacted_messages, summary_text) — summary_text is None if no
+        compaction was performed.
     """
     if not messages:
-        return messages
+        return messages, None
 
     # Split system prompt from conversation
     system_msg = messages[0] if messages[0].get("role") == "system" else None
@@ -99,14 +100,14 @@ async def compact_messages(
 
     # Not enough to compact
     if len(conversation) <= keep_recent:
-        return messages
+        return messages, None
 
     # Split into old (to summarize) and recent (to keep)
     old_messages = conversation[:-keep_recent]
     recent_messages = conversation[-keep_recent:]
 
     if not old_messages:
-        return messages
+        return messages, None
 
     # Build prompt and call LLM for summary
     all_for_summary = ([system_msg] if system_msg else []) + old_messages
@@ -126,7 +127,7 @@ async def compact_messages(
         tools=None,
     )
 
-    summary = summary_response.content or "Conversation summary unavailable."
+    summary: str = summary_response.content or "Conversation summary unavailable."
 
     logger.info(
         "compaction complete",
@@ -138,15 +139,13 @@ async def compact_messages(
     )
 
     # Rebuild: system + summary as system note + recent messages
+    summary_content: str = (
+        f"[Conversation summary — older messages were compacted]\n\n{summary}"
+    )
     result: list[dict[str, Any]] = []
     if system_msg:
         result.append(system_msg)
-    result.append(
-        {
-            "role": "system",
-            "content": f"[Conversation summary — older messages were compacted]\n\n{summary}",
-        }
-    )
+    result.append({"role": "system", "content": summary_content})
     result.extend(recent_messages)
 
-    return result
+    return result, summary_content

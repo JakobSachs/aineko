@@ -13,7 +13,13 @@ from aineko.compaction import compact_messages, should_compact
 from aineko.config import Settings
 from aineko.context import trim_messages
 from aineko.cron.scheduler import CronScheduler
-from aineko.db import async_session_factory, create_tables, dispose_engine, get_session, init_engine
+from aineko.db import (
+    async_session_factory,
+    create_tables,
+    dispose_engine,
+    get_session,
+    init_engine,
+)
 from aineko.handler import (
     build_request_tools,
     handle_command,
@@ -102,6 +108,7 @@ async def handle_message(
     memory_dir: Path,
     max_context_tokens: int,
     bg_tasks: BackgroundTaskManager | None = None,
+    compaction_keep_recent: int = 4,
 ) -> None:
     """Core message handler: load session, run agent, send reply."""
     from sqlalchemy import delete as sa_delete
@@ -113,7 +120,9 @@ async def handle_message(
             return
 
         sent_messages: list[str] = []
-        request_tools: ToolRegistry = build_request_tools(tools, matrix, msg.room_id, sent_messages, bg_tasks)
+        request_tools: ToolRegistry = build_request_tools(
+            tools, matrix, msg.room_id, sent_messages, bg_tasks
+        )
 
         sys_prompt: str = build_system_prompt(skills, soul_path, memory_dir)
         session, user_msg, messages = await load_conversation(db, msg, sys_prompt)
@@ -121,8 +130,8 @@ async def handle_message(
         # Compact if conversation is getting long
         if should_compact(messages, max_context_tokens):
             logger.info("conversation approaching context limit, compacting")
-            # Need history for compaction cleanup
             from sqlalchemy import select
+
             result = await db.execute(
                 select(Message)
                 .where(Message.session_id == session.id)
@@ -130,20 +139,23 @@ async def handle_message(
             )
             history: list[Message] = list(result.scalars().all())
 
-            messages = await compact_messages(messages, kimi)
-            old_msg_ids: list[int] = [m.id for m in history[:-4]] if len(history) > 4 else []
-            if old_msg_ids:
-                await db.execute(sa_delete(Message).where(Message.id.in_(old_msg_ids)))
-                summary_msg = [
-                    m for m in messages
-                    if m.get("role") == "system" and "compacted" in m.get("content", "")
-                ]
-                if summary_msg:
-                    db.add(Message(
+            messages, summary_text = await compact_messages(
+                messages,
+                kimi,
+                keep_recent=compaction_keep_recent,
+            )
+            if summary_text:
+                if old_msg_ids := [m.id for m in history[:-compaction_keep_recent]]:
+                    await db.execute(
+                        sa_delete(Message).where(Message.id.in_(old_msg_ids))
+                    )
+                db.add(
+                    Message(
                         session_id=session.id,
                         role=Role.SYSTEM,
-                        content=summary_msg[0]["content"],
-                    ))
+                        content=summary_text,
+                    )
+                )
                 await db.flush()
 
         messages = trim_messages(messages, max_context_tokens)
@@ -197,6 +209,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 "setup.sh failed (exit %d): %s", result.returncode, result.stderr[:500]
             )
     max_ctx: int = settings.kimi.max_context_tokens
+    keep_recent: int = settings.kimi.compaction_keep_recent
 
     # Background task manager
     bg_task_mgr: BackgroundTaskManager = BackgroundTaskManager()
@@ -216,6 +229,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             memory_dir,
             max_ctx,
             bg_task_mgr,
+            compaction_keep_recent=keep_recent,
         )
     )
 
@@ -223,7 +237,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     cron: CronScheduler = CronScheduler()
 
     # Heartbeat
-    heartbeat: HeartbeatRunner = HeartbeatRunner(settings.heartbeat, settings.heartbeat_file)
+    heartbeat: HeartbeatRunner = HeartbeatRunner(
+        settings.heartbeat, settings.heartbeat_file
+    )
 
     # Wire cron runner
     sys_prompt: str = build_system_prompt(skills, soul_path, memory_dir)
@@ -257,7 +273,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         bg_tasks.append(
             asyncio.create_task(
                 heartbeat_tick_loop(
-                    heartbeat, kimi, tools, matrix, heartbeat_room, sys_prompt,
+                    heartbeat,
+                    kimi,
+                    tools,
+                    matrix,
+                    heartbeat_room,
+                    sys_prompt,
                     interval=interval,
                 ),
                 name="heartbeat",

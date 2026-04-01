@@ -111,7 +111,7 @@ async def test_compact_messages_returns_summary():
         {"role": "user", "content": "latest question"},
     ]
 
-    result = await compact_messages(messages, mock_kimi, keep_recent=4)
+    result, summary = await compact_messages(messages, mock_kimi, keep_recent=4)
 
     # Should have: system + compaction summary + recent messages
     assert result[0]["role"] == "system"
@@ -120,6 +120,9 @@ async def test_compact_messages_returns_summary():
     # Recent messages preserved
     assert any("latest question" in m.get("content", "") for m in result)
     assert any("recent message" in m.get("content", "") for m in result)
+    # Summary returned explicitly
+    assert summary is not None
+    assert "Fix bugs" in summary
 
 
 @pytest.mark.asyncio
@@ -142,8 +145,9 @@ async def test_compact_messages_preserves_system():
         {"role": "user", "content": "new"},
     ]
 
-    result = await compact_messages(messages, mock_kimi, keep_recent=2)
+    result, summary = await compact_messages(messages, mock_kimi, keep_recent=2)
     assert result[0]["content"] == "original system prompt"
+    assert summary is not None
 
 
 @pytest.mark.asyncio
@@ -159,7 +163,8 @@ async def test_compact_messages_too_short_returns_unchanged():
         {"role": "assistant", "content": "hi"},
     ]
 
-    result = await compact_messages(messages, mock_kimi, keep_recent=4)
+    result, summary = await compact_messages(messages, mock_kimi, keep_recent=4)
     # Too few messages to compact — returned unchanged
     assert result == messages
+    assert summary is None
     mock_kimi.chat.assert_not_called()
