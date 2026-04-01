@@ -15,6 +15,7 @@ from aineko.config import Settings
 from aineko.context import trim_messages
 from aineko.cron.scheduler import CronScheduler
 from aineko.db import create_tables, dispose_engine, get_session, init_engine
+from aineko.heartbeat.loop import heartbeat_tick_loop
 from aineko.heartbeat.runner import HeartbeatRunner
 from aineko.kimi.client import KimiClient
 from aineko.matrix.client import MatrixConnector
@@ -439,46 +440,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         heartbeat_room = settings.heartbeat.room or (
             settings.matrix.room_list[0] if settings.matrix.room_list else ""
         )
-
-        async def heartbeat_loop() -> None:
-            import asyncio as _asyncio
-
-            interval = settings.heartbeat.every_minutes * 60
-            while True:
-                await _asyncio.sleep(interval)
-                try:
-                    if not heartbeat.should_run():
-                        continue
-
-                    tasks_content = heartbeat.get_tasks()
-                    messages = [
-                        {"role": "system", "content": sys_prompt},
-                        {
-                            "role": "user",
-                            "content": (
-                                "Heartbeat check-in. Review your tasks and take "
-                                "any appropriate action.\n\n" + tasks_content
-                            ),
-                        },
-                    ]
-
-                    # Give heartbeat a send_message tool so it can proactively reach out
-                    hb_tools = ToolRegistry()
-                    for tool_def in tools._tools.values():
-                        hb_tools.register(tool_def)
-                    hb_tools.register(
-                        make_send_message_tool(matrix, heartbeat_room, [])
-                    )
-
-                    response = await kimi.chat_loop(messages, hb_tools)
-
-                    if response.content and heartbeat.should_deliver(response.content):
-                        if heartbeat_room:
-                            await matrix.send_message(heartbeat_room, response.content)
-                except Exception:
-                    logger.exception("Heartbeat tick failed")
-
-        bg_tasks.append(asyncio.create_task(heartbeat_loop(), name="heartbeat"))
+        interval = settings.heartbeat.every_minutes * 60
+        bg_tasks.append(
+            asyncio.create_task(
+                heartbeat_tick_loop(
+                    heartbeat, kimi, tools, matrix, heartbeat_room, sys_prompt,
+                    interval=interval,
+                ),
+                name="heartbeat",
+            )
+        )
 
     logger.info("aineko started")
 
