@@ -14,12 +14,12 @@ from aineko.config import Settings
 from aineko.context import trim_messages
 from aineko.cron.scheduler import CronScheduler
 from aineko.db import (
-    async_session_factory,
     create_tables,
     dispose_engine,
     get_session,
     init_engine,
 )
+import aineko.db as _db
 from aineko.handler import (
     build_request_tools,
     handle_command,
@@ -113,9 +113,9 @@ async def handle_message(
     """Core message handler: load session, run agent, send reply."""
     from sqlalchemy import delete as sa_delete
 
-    assert async_session_factory is not None
+    assert _db.async_session_factory is not None
 
-    async with async_session_factory() as db:
+    async with _db.async_session_factory() as db:
         if await handle_command(db, msg, matrix):
             return
 
