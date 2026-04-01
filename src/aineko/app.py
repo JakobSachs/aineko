@@ -4,7 +4,6 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +13,18 @@ from aineko.compaction import compact_messages, should_compact
 from aineko.config import Settings
 from aineko.context import trim_messages
 from aineko.cron.scheduler import CronScheduler
-from aineko.db import create_tables, dispose_engine, get_session, init_engine
+from aineko.db import async_session_factory, create_tables, dispose_engine, get_session, init_engine
+from aineko.handler import (
+    build_request_tools,
+    handle_command,
+    load_conversation,
+    persist_response,
+)
 from aineko.heartbeat.loop import heartbeat_tick_loop
 from aineko.heartbeat.runner import HeartbeatRunner
 from aineko.kimi.client import KimiClient
 from aineko.matrix.client import MatrixConnector
+from aineko.models.message import Message, Role
 from aineko.routes.health import router as health_router
 from aineko.schemas.message import IncomingMessage
 from aineko.skills.engine import SkillsEngine
@@ -34,11 +40,6 @@ from aineko.tools import web_search as web_search_mod
 from aineko.tools.search_chat import search_chat_tool
 from aineko.tools.tool_history import search_tool_history_tool
 from aineko.tools.background_task import BackgroundTaskManager
-from aineko.tools.messaging import (
-    make_background_task_tools,
-    make_send_file_tool,
-    make_send_message_tool,
-)
 from aineko.tools.web_search import web_search_tool
 
 logger = logging.getLogger(__name__)
@@ -103,244 +104,56 @@ async def handle_message(
     bg_tasks: BackgroundTaskManager | None = None,
 ) -> None:
     """Core message handler: load session, run agent, send reply."""
-    from sqlalchemy import select
+    from sqlalchemy import delete as sa_delete
 
-    from aineko.models.message import Message, Role, Session, ToolLog
+    assert async_session_factory is not None
 
-    # Handle /reset command
-    if msg.body.strip().lower() in ("/reset", "/clear", "/forget"):
-        async for db in get_session():
-            result = await db.execute(
-                select(Session).where(Session.room_id == msg.room_id)
-            )
-            session = result.scalar_one_or_none()
-            if session:
-                await db.execute(
-                    select(Message)
-                    .where(Message.session_id == session.id)
-                    .with_for_update()
-                )
-                from sqlalchemy import delete
+    async with async_session_factory() as db:
+        if await handle_command(db, msg, matrix):
+            return
 
-                await db.execute(
-                    delete(Message).where(Message.session_id == session.id)
-                )
-                await db.commit()
-            await matrix.send_message(msg.room_id, "conversation cleared, fresh start")
-        return
+        sent_messages: list[str] = []
+        request_tools = build_request_tools(tools, matrix, msg.room_id, sent_messages, bg_tasks)
 
-    # Track messages sent via the send_message tool
-    sent_messages: list[str] = []
+        sys_prompt = build_system_prompt(skills, soul_path, memory_dir)
+        session, user_msg, messages = await load_conversation(db, msg, sys_prompt)
 
-    # Build per-request tools with context-bound messaging tools
-    request_tools = ToolRegistry()
-    for tool_def in tools._tools.values():
-        request_tools.register(tool_def)
-    request_tools.register(make_send_message_tool(matrix, msg.room_id, sent_messages))
-    request_tools.register(make_send_file_tool(matrix, msg.room_id))
-
-    if bg_tasks is not None:
-        for tool_def in make_background_task_tools(bg_tasks, msg.room_id, matrix):
-            request_tools.register(tool_def)
-
-    async for db in get_session():
-        # Get or create session for this room
-        result = await db.execute(select(Session).where(Session.room_id == msg.room_id))
-        session = result.scalar_one_or_none()
-        if session is None:
-            session = Session(room_id=msg.room_id)
-            db.add(session)
-            await db.flush()
-
-        # Save incoming message
-        user_msg = Message(
-            session_id=session.id,
-            role=Role.USER,
-            content=msg.body,
-        )
-        db.add(user_msg)
-        await db.flush()
-
-        # Load conversation history
-        result = await db.execute(
-            select(Message)
-            .where(Message.session_id == session.id)
-            .order_by(Message.created_at)
-        )
-        history = result.scalars().all()
-
-        # Build messages for Kimi
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "system",
-                "content": build_system_prompt(skills, soul_path, memory_dir),
-            }
-        ]
-        import json as _json
-
-        for m in history:
-            if m.role == Role.ASSISTANT and m.tool_name == "__has_tool_calls__":
-                # Reconstruct Anthropic content blocks from stored JSON
-                try:
-                    blocks = _json.loads(m.content)
-                    messages.append({"role": "assistant", "content": blocks})
-                except _json.JSONDecodeError:
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": m.content}],
-                        }
-                    )
-            elif m.role == Role.TOOL and m.tool_name == "__tool_results__":
-                # Reconstruct tool_result user message from stored JSON
-                try:
-                    blocks = _json.loads(m.content)
-                    messages.append({"role": "user", "content": blocks})
-                except _json.JSONDecodeError:
-                    pass  # skip corrupted tool results
-            elif m.role == Role.ASSISTANT:
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": m.content}],
-                    }
-                )
-            elif m.role == Role.SYSTEM:
-                messages.append({"role": "system", "content": m.content})
-            else:
-                messages.append({"role": m.role.value, "content": m.content})
-
-        # If current message has an image, make the last user message multimodal
-        if msg.image_b64 and msg.image_mime:
-            last_user = messages[-1]
-            last_user["content"] = [
-                {"type": "text", "text": last_user["content"]},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{msg.image_mime};base64,{msg.image_b64}"
-                    },
-                },
-            ]
-
-        # Compact if conversation is getting long (LLM-powered summary)
+        # Compact if conversation is getting long
         if should_compact(messages, max_context_tokens):
             logger.info("conversation approaching context limit, compacting")
+            # Need history for compaction cleanup
+            from sqlalchemy import select
+            result = await db.execute(
+                select(Message)
+                .where(Message.session_id == session.id)
+                .order_by(Message.created_at)
+            )
+            history = result.scalars().all()
+
             messages = await compact_messages(messages, kimi)
-
-            # Persist the compaction: delete old messages, insert summary
-            # Find messages that were compacted (everything before recent ones)
-            from sqlalchemy import delete as sa_delete
-
             old_msg_ids = [m.id for m in history[:-4]] if len(history) > 4 else []
             if old_msg_ids:
                 await db.execute(sa_delete(Message).where(Message.id.in_(old_msg_ids)))
-                # Save the compaction summary to DB
                 summary_msg = [
-                    m
-                    for m in messages
+                    m for m in messages
                     if m.get("role") == "system" and "compacted" in m.get("content", "")
                 ]
                 if summary_msg:
-                    db.add(
-                        Message(
-                            session_id=session.id,
-                            role=Role.SYSTEM,
-                            content=summary_msg[0]["content"],
-                        )
-                    )
+                    db.add(Message(
+                        session_id=session.id,
+                        role=Role.SYSTEM,
+                        content=summary_msg[0]["content"],
+                    ))
                 await db.flush()
 
-        # Trim as safety net (in case compaction wasn't enough)
         messages = trim_messages(messages, max_context_tokens)
 
-        # Run agent loop
         response = await kimi.chat_loop(messages, request_tools)
 
-        # Auto-send final response if model has text content
         if response.content:
             await matrix.send_message(msg.room_id, response.content)
 
-        # Persist conversation in Anthropic-reconstructable format.
-        # If tools were called, save: assistant (with tool_use refs) + tool results + final text.
-        # This lets us rebuild proper content blocks when loading history.
-        import json as _json
-
-        if response.tool_history:
-            # Save assistant message with tool call metadata as JSON content blocks
-            assistant_blocks: list[dict[str, Any]] = []
-            # Include any intermediate send_message content
-            for sm in sent_messages:
-                assistant_blocks.append({"type": "text", "text": sm})
-            for rec in response.tool_history:
-                assistant_blocks.append(
-                    {
-                        "type": "tool_use",
-                        "id": f"persisted_{rec.tool_name}_{id(rec)}",
-                        "name": rec.tool_name,
-                        "input": _json.loads(rec.arguments) if rec.arguments else {},
-                    }
-                )
-            if response.content:
-                assistant_blocks.append({"type": "text", "text": response.content})
-            db.add(
-                Message(
-                    session_id=session.id,
-                    role=Role.ASSISTANT,
-                    # Store as JSON so we can reconstruct content blocks on load
-                    content=_json.dumps(assistant_blocks),
-                    token_count=response.usage.get("total_tokens"),
-                    tool_name="__has_tool_calls__",  # marker
-                )
-            )
-
-            # Save tool results as a single "tool" role message with JSON content blocks
-            result_blocks: list[dict[str, Any]] = []
-            for rec in response.tool_history:
-                result_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": f"persisted_{rec.tool_name}_{id(rec)}",
-                        "content": rec.result[:2000],  # cap stored results
-                    }
-                )
-            db.add(
-                Message(
-                    session_id=session.id,
-                    role=Role.TOOL,
-                    content=_json.dumps(result_blocks),
-                    tool_name="__tool_results__",  # marker
-                )
-            )
-        else:
-            # No tool calls — save plain assistant message
-            all_visible = sent_messages.copy()
-            if response.content:
-                all_visible.append(response.content)
-            visible = "\n".join(all_visible) if all_visible else ""
-            if visible:
-                db.add(
-                    Message(
-                        session_id=session.id,
-                        role=Role.ASSISTANT,
-                        content=visible,
-                        token_count=response.usage.get("total_tokens"),
-                    )
-                )
-
-        # Persist tool call history
-        for rec in response.tool_history:
-            db.add(
-                ToolLog(
-                    session_id=session.id,
-                    message_id=user_msg.id,
-                    tool_name=rec.tool_name,
-                    arguments=rec.arguments,
-                    result=rec.result,
-                )
-            )
-
-        await db.commit()
+        await persist_response(db, session, user_msg, response, sent_messages)
 
 
 @asynccontextmanager
