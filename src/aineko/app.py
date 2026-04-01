@@ -22,7 +22,7 @@ from aineko.handler import (
 )
 from aineko.heartbeat.loop import heartbeat_tick_loop
 from aineko.heartbeat.runner import HeartbeatRunner
-from aineko.kimi.client import KimiClient
+from aineko.kimi.client import ChatResponse, KimiClient
 from aineko.matrix.client import MatrixConnector
 from aineko.models.message import Message, Role
 from aineko.routes.health import router as health_router
@@ -113,9 +113,9 @@ async def handle_message(
             return
 
         sent_messages: list[str] = []
-        request_tools = build_request_tools(tools, matrix, msg.room_id, sent_messages, bg_tasks)
+        request_tools: ToolRegistry = build_request_tools(tools, matrix, msg.room_id, sent_messages, bg_tasks)
 
-        sys_prompt = build_system_prompt(skills, soul_path, memory_dir)
+        sys_prompt: str = build_system_prompt(skills, soul_path, memory_dir)
         session, user_msg, messages = await load_conversation(db, msg, sys_prompt)
 
         # Compact if conversation is getting long
@@ -128,10 +128,10 @@ async def handle_message(
                 .where(Message.session_id == session.id)
                 .order_by(Message.created_at)
             )
-            history = result.scalars().all()
+            history: list[Message] = list(result.scalars().all())
 
             messages = await compact_messages(messages, kimi)
-            old_msg_ids = [m.id for m in history[:-4]] if len(history) > 4 else []
+            old_msg_ids: list[int] = [m.id for m in history[:-4]] if len(history) > 4 else []
             if old_msg_ids:
                 await db.execute(sa_delete(Message).where(Message.id.in_(old_msg_ids)))
                 summary_msg = [
@@ -148,7 +148,7 @@ async def handle_message(
 
         messages = trim_messages(messages, max_context_tokens)
 
-        response = await kimi.chat_loop(messages, request_tools)
+        response: ChatResponse = await kimi.chat_loop(messages, request_tools)
 
         if response.content:
             await matrix.send_message(msg.room_id, response.content)
@@ -166,23 +166,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     logger.info("Database ready: %s", settings.db_url)
 
     # Skills
-    skills = SkillsEngine(settings.skills_dir)
+    skills: SkillsEngine = SkillsEngine(settings.skills_dir)
     skills.load_all()
 
     # Tools
-    tools = build_tools()
+    tools: ToolRegistry = build_tools()
     web_search_mod.brave_api_key = settings.brave_api_key
 
     # Kimi
-    kimi = KimiClient(settings.kimi)
+    kimi: KimiClient = KimiClient(settings.kimi)
 
     # Soul + Memory
-    soul_path = settings.data_dir / "soul.md"
-    memory_dir = settings.data_dir / "memory"
+    soul_path: Path = settings.data_dir / "soul.md"
+    memory_dir: Path = settings.data_dir / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
 
     # Run persistent setup script if it exists
-    setup_script = settings.data_dir / "setup.sh"
+    setup_script: Path = settings.data_dir / "setup.sh"
     if setup_script.exists():
         import subprocess
 
@@ -196,13 +196,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             logger.warning(
                 "setup.sh failed (exit %d): %s", result.returncode, result.stderr[:500]
             )
-    max_ctx = settings.kimi.max_context_tokens
+    max_ctx: int = settings.kimi.max_context_tokens
 
     # Background task manager
-    bg_task_mgr = BackgroundTaskManager()
+    bg_task_mgr: BackgroundTaskManager = BackgroundTaskManager()
 
     # Matrix
-    matrix = MatrixConnector(
+    matrix: MatrixConnector = MatrixConnector(
         settings.matrix, store_path=settings.data_dir / "crypto_store"
     )
     matrix.on_message(
@@ -220,13 +220,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     )
 
     # Cron
-    cron = CronScheduler()
+    cron: CronScheduler = CronScheduler()
 
     # Heartbeat
-    heartbeat = HeartbeatRunner(settings.heartbeat, settings.heartbeat_file)
+    heartbeat: HeartbeatRunner = HeartbeatRunner(settings.heartbeat, settings.heartbeat_file)
 
     # Wire cron runner
-    sys_prompt = build_system_prompt(skills, soul_path, memory_dir)
+    sys_prompt: str = build_system_prompt(skills, soul_path, memory_dir)
     cron.set_runner(
         lambda job: run_cron_job(job, kimi, tools, skills, matrix, sys_prompt)
     )
@@ -250,10 +250,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Heartbeat periodic task
     if settings.heartbeat.enabled:
-        heartbeat_room = settings.heartbeat.room or (
+        heartbeat_room: str = settings.heartbeat.room or (
             settings.matrix.room_list[0] if settings.matrix.room_list else ""
         )
-        interval = settings.heartbeat.every_minutes * 60
+        interval: int = settings.heartbeat.every_minutes * 60
         bg_tasks.append(
             asyncio.create_task(
                 heartbeat_tick_loop(

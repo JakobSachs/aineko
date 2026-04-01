@@ -19,6 +19,7 @@ from aineko.tools.registry import ToolRegistry
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from aineko.kimi.client import ChatResponse
     from aineko.matrix.client import MatrixConnector
     from aineko.schemas.message import IncomingMessage
     from aineko.tools.background_task import BackgroundTaskManager
@@ -38,7 +39,7 @@ async def handle_command(
         return False
 
     result = await db.execute(select(Session).where(Session.room_id == msg.room_id))
-    session = result.scalar_one_or_none()
+    session: Session | None = result.scalar_one_or_none()
     if session:
         await db.execute(delete(Message).where(Message.session_id == session.id))
         await db.commit()
@@ -76,14 +77,14 @@ async def load_conversation(
     """Load or create session, save user message, build messages list for kimi."""
     # Get or create session
     result = await db.execute(select(Session).where(Session.room_id == msg.room_id))
-    session = result.scalar_one_or_none()
+    session: Session | None = result.scalar_one_or_none()
     if session is None:
         session = Session(room_id=msg.room_id)
         db.add(session)
         await db.flush()
 
     # Save incoming message
-    user_msg = Message(session_id=session.id, role=Role.USER, content=msg.body)
+    user_msg: Message = Message(session_id=session.id, role=Role.USER, content=msg.body)
     db.add(user_msg)
     await db.flush()
 
@@ -93,7 +94,7 @@ async def load_conversation(
         .where(Message.session_id == session.id)
         .order_by(Message.created_at)
     )
-    history = result.scalars().all()
+    history: list[Message] = list(result.scalars().all())
 
     # Build messages for kimi
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -124,7 +125,7 @@ async def load_conversation(
 
     # Image attachment
     if msg.image_b64 and msg.image_mime:
-        last_user = messages[-1]
+        last_user: dict[str, Any] = messages[-1]
         last_user["content"] = [
             {"type": "text", "text": last_user["content"]},
             {
@@ -140,7 +141,7 @@ async def persist_response(
     db: AsyncSession,
     session: Session,
     user_msg: Message,
-    response: Any,
+    response: ChatResponse,
     sent_messages: list[str],
 ) -> None:
     """Save the assistant response and tool logs to DB."""
@@ -191,10 +192,10 @@ async def persist_response(
         )
     else:
         # Plain assistant message
-        all_visible = sent_messages.copy()
+        all_visible: list[str] = sent_messages.copy()
         if response.content:
             all_visible.append(response.content)
-        visible = "\n".join(all_visible) if all_visible else ""
+        visible: str = "\n".join(all_visible) if all_visible else ""
         if visible:
             db.add(
                 Message(
