@@ -21,33 +21,34 @@ def data_dir(tmp_path, monkeypatch):
 async def test_read_file(data_dir):
     (data_dir / "hello.txt").write_text("line1\nline2\nline3\n")
     result = await read_file("hello.txt")
-    assert "line1" in result
-    assert "line3" in result
+    assert "1: line1" in result
+    assert "3: line3" in result
 
 
 @pytest.mark.asyncio
 async def test_read_file_with_offset(data_dir):
     (data_dir / "lines.txt").write_text("a\nb\nc\nd\ne\n")
     result = await read_file("lines.txt", offset=3)
-    assert result.startswith("c\n")
-    assert "a\n" not in result
+    assert "3: c" in result
+    assert "1: a" not in result
 
 
 @pytest.mark.asyncio
 async def test_read_file_with_limit(data_dir):
     (data_dir / "lines.txt").write_text("a\nb\nc\nd\ne\n")
     result = await read_file("lines.txt", limit=2)
-    assert "a\n" in result
-    assert "b\n" in result
-    assert "c" not in result
+    assert "1: a" in result
+    assert "2: b" in result
+    assert "3: c" not in result
 
 
 @pytest.mark.asyncio
 async def test_read_file_with_offset_and_limit(data_dir):
     (data_dir / "lines.txt").write_text("a\nb\nc\nd\ne\n")
     result = await read_file("lines.txt", offset=2, limit=2)
-    assert "b\nc\n" in result
-    assert "2 more lines" in result
+    assert "2: b" in result
+    assert "3: c" in result
+    assert "offset=" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -80,7 +81,7 @@ async def test_write_file_creates_dirs(data_dir):
 async def test_edit_file_replaces_text(data_dir):
     (data_dir / "doc.md").write_text("hello world\ngoodbye world\n")
     result = await edit_file("doc.md", "hello world", "hi there")
-    assert "replaced" in result.lower() or "Edited" in result
+    assert "Edited" in result
     assert (data_dir / "doc.md").read_text() == "hi there\ngoodbye world\n"
 
 
@@ -103,7 +104,6 @@ async def test_edit_file_old_text_not_found(data_dir):
     (data_dir / "doc.md").write_text("actual content here\n")
     result = await edit_file("doc.md", "nonexistent text", "new")
     assert "not found" in result.lower()
-    # Should show file preview to help the model
     assert "actual content" in result
 
 
@@ -112,7 +112,6 @@ async def test_edit_file_ambiguous_match(data_dir):
     (data_dir / "doc.md").write_text("foo bar\nfoo bar\n")
     result = await edit_file("doc.md", "foo bar", "baz")
     assert "2 times" in result
-    # File should be unchanged
     assert (data_dir / "doc.md").read_text() == "foo bar\nfoo bar\n"
 
 
@@ -133,7 +132,6 @@ async def test_edit_file_multiline(data_dir):
 
 @pytest.mark.asyncio
 async def test_read_binary_by_extension(data_dir):
-    """Binary files detected by extension return info, not content."""
     (data_dir / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
     result = await read_file("image.png")
     assert "Binary file" in result
@@ -142,7 +140,6 @@ async def test_read_binary_by_extension(data_dir):
 
 @pytest.mark.asyncio
 async def test_read_binary_by_content(data_dir):
-    """Files with lots of non-printable chars detected as binary."""
     (data_dir / "mystery.dat").write_bytes(bytes(range(256)) * 10)
     result = await read_file("mystery.dat")
     assert "Binary file" in result

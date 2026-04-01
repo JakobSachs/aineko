@@ -33,6 +33,14 @@ class StructuredFormatter(logging.Formatter):
             "content",
             "body",
             "result_preview",
+            "reasoning",
+            "raw_args",
+            "finish_reason",
+            "raw_tool_call_count",
+            "tool_count",
+            "tool_names",
+            "msg_count",
+            "endpoint",
         ):
             val = getattr(record, key, None)
             if val is not None:

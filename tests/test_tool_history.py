@@ -51,7 +51,9 @@ async def test_chat_loop_returns_tool_history():
         if call_count == 1:
             return ChatResponse(
                 content="",
-                tool_calls=[ToolCall(id="tc1", name="bash", arguments={"command": "ls"})],
+                tool_calls=[
+                    ToolCall(id="tc1", name="bash", arguments={"command": "ls"})
+                ],
             )
         return ChatResponse(content="done", tool_calls=[])
 
@@ -64,12 +66,18 @@ async def test_chat_loop_returns_tool_history():
     async def fake_bash(command: str = "") -> str:
         return "file1.txt"
 
-    registry.register(ToolDef(
-        name="bash",
-        description="run bash",
-        parameters={"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
-        handler=fake_bash,
-    ))
+    registry.register(
+        ToolDef(
+            name="bash",
+            description="run bash",
+            parameters={
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+            handler=fake_bash,
+        )
+    )
 
     response = await client.chat_loop([], registry)
 
@@ -101,12 +109,16 @@ async def test_chat_loop_multi_round_history():
         if call_count == 1:
             return ChatResponse(
                 content="",
-                tool_calls=[ToolCall(id="tc1", name="bash", arguments={"command": "ls"})],
+                tool_calls=[
+                    ToolCall(id="tc1", name="bash", arguments={"command": "ls"})
+                ],
             )
         if call_count == 2:
             return ChatResponse(
                 content="",
-                tool_calls=[ToolCall(id="tc2", name="read_file", arguments={"path": "/data/x"})],
+                tool_calls=[
+                    ToolCall(id="tc2", name="read_file", arguments={"path": "/data/x"})
+                ],
             )
         return ChatResponse(content="all done")
 
@@ -120,8 +132,22 @@ async def test_chat_loop_multi_round_history():
     async def fake_read(path: str = "") -> str:
         return "file contents"
 
-    registry.register(ToolDef(name="bash", description="", parameters={"type": "object", "properties": {}, "required": []}, handler=fake_bash))
-    registry.register(ToolDef(name="read_file", description="", parameters={"type": "object", "properties": {}, "required": []}, handler=fake_read))
+    registry.register(
+        ToolDef(
+            name="bash",
+            description="",
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=fake_bash,
+        )
+    )
+    registry.register(
+        ToolDef(
+            name="read_file",
+            description="",
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=fake_read,
+        )
+    )
 
     response = await client.chat_loop([], registry)
 

@@ -1,17 +1,21 @@
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+FROM ubuntu:24.04
 
 WORKDIR /app
 
-# Install system deps for matrix-nio[e2e] (libolm)
+# Install system deps (python3.12, libolm for matrix-nio[e2e], ROCm runtime libs)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        libolm-dev gcc curl git && \
+        python3.12 python3.12-dev python3.12-venv \
+        libolm-dev gcc clang curl ca-certificates git ripgrep \
+        libnuma1 libdrm2 poppler-utils imagemagick file jq && \
     rm -rf /var/lib/apt/lists/*
+
+# Install uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
 
 # Copy dependency files first (cache layer)
 COPY pyproject.toml uv.lock ./
-
-# Install dependencies (no dev group)
 RUN uv sync --no-dev --no-install-project
 
 # Copy source, readme, alembic

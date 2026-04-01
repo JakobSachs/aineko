@@ -27,9 +27,7 @@ async def _search_tool_history(
 
         if keyword:
             kw = f"%{keyword}%"
-            query = query.where(
-                ToolLog.arguments.ilike(kw) | ToolLog.result.ilike(kw)
-            )
+            query = query.where(ToolLog.arguments.ilike(kw) | ToolLog.result.ilike(kw))
 
         query = query.limit(limit)
         result = await db.execute(query)
@@ -53,7 +51,7 @@ async def _search_tool_history(
 
             trigger = msg_cache[log.message_id]
             lines.append(
-                f"[{log.created_at}] triggered by: \"{trigger}\"\n"
+                f'[{log.created_at}] triggered by: "{trigger}"\n'
                 f"  {log.tool_name}({log.arguments})\n"
                 f"  -> {log.result[:500]}"
             )

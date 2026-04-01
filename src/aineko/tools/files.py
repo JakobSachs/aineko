@@ -9,7 +9,8 @@ logger = logging.getLogger(__name__)
 
 DATA_ROOT = Path("/data")
 MAX_READ = 50_000  # chars
-DEFAULT_LINE_LIMIT = 200
+DEFAULT_LINE_LIMIT = 2000
+MAX_LINE_LENGTH = 2000
 
 
 def _resolve_path(path: str) -> Path:
@@ -59,9 +60,27 @@ BINARY_EXTENSIONS = {
 
 
 async def read_file(path: str, offset: int = 0, limit: int = 0) -> str:
-    """Read a file with optional line offset and limit."""
+    """Read a file or directory with line numbers, OpenCode-style output."""
     try:
         resolved = _resolve_path(path)
+
+        # Directory listing
+        if resolved.is_dir():
+            entries = sorted(resolved.iterdir())
+            entry_lines = []
+            for e in entries:
+                name = e.name + ("/" if e.is_dir() else "")
+                entry_lines.append(name)
+            total = len(entry_lines)
+            effective_limit = limit if limit > 0 else DEFAULT_LINE_LIMIT
+            start = max(0, offset - 1) if offset > 0 else 0
+            shown = entry_lines[start : start + effective_limit]
+            body = "\n".join(shown)
+            if len(shown) < total:
+                body += f"\n(Showing {len(shown)} of {total} entries. Use offset to read beyond entry {start + len(shown)})"
+            else:
+                body += f"\n({total} entries)"
+            return f"<path>{path}</path>\n<type>directory</type>\n<entries>\n{body}\n</entries>"
 
         # Refuse to read binary files as text
         if resolved.suffix.lower() in BINARY_EXTENSIONS:
@@ -81,34 +100,45 @@ async def read_file(path: str, offset: int = 0, limit: int = 0) -> str:
                     f"Binary file: {path} ({len(content)} bytes). Use bash to inspect."
                 )
 
-        lines = content.splitlines(keepends=True)
-
+        lines = content.splitlines()
         total_lines = len(lines)
 
-        if offset > 0:
-            lines = lines[offset - 1 :]  # 1-based
-        after_offset = len(lines)
+        # Apply offset (1-based)
+        start_line = max(0, offset - 1) if offset > 0 else 0
+        view = lines[start_line:]
         effective_limit = limit if limit > 0 else DEFAULT_LINE_LIMIT
-        lines = lines[:effective_limit]
+        view = view[:effective_limit]
 
-        result = "".join(lines)
-        remaining = after_offset - len(lines)
+        # Format with line numbers, truncate long lines
+        numbered: list[str] = []
+        for i, line in enumerate(view, start=start_line + 1):
+            if len(line) > MAX_LINE_LENGTH:
+                line = line[:MAX_LINE_LENGTH] + "... (line truncated to 2000 chars)"
+            numbered.append(f"{i}: {line}")
+
+        last_shown = start_line + len(view)
+        remaining = total_lines - last_shown
+
         if remaining > 0:
-            result += f"\n... ({remaining} more lines, {total_lines} total. Use offset/limit to read more.)"
-        if len(result) > MAX_READ:
-            result = (
-                result[:MAX_READ] + f"\n... (truncated, {len(content)} total chars)"
-            )
+            footer = f"(Showing lines {start_line + 1}-{last_shown} of {total_lines}. Use offset={last_shown + 1} to continue.)"
+        else:
+            footer = f"(End of file — total {total_lines} lines)"
+
+        body = "\n".join(numbered) + "\n" + footer
+
+        # Final size cap
+        if len(body) > MAX_READ:
+            body = body[:MAX_READ] + f"\n... (truncated, {len(content)} total chars)"
 
         logger.info(
             "read file",
             extra={
                 "event": "file_read",
                 "tool": "read_file",
-                "result_len": len(result),
+                "result_len": len(body),
             },
         )
-        return result
+        return f"<path>{path}</path>\n<type>file</type>\n<content>\n{body}\n</content>"
     except Exception as e:
         return f"Error: {e}"
 
@@ -132,7 +162,9 @@ async def write_file(path: str, content: str) -> str:
         return f"Error: {e}"
 
 
-async def edit_file(path: str, old_text: str, new_text: str) -> str:
+async def edit_file(
+    path: str, old_text: str, new_text: str, replace_all: bool = False
+) -> str:
     """Replace exact text in a file. Finds old_text and replaces with new_text."""
     try:
         resolved = _resolve_path(path)
@@ -146,10 +178,13 @@ async def edit_file(path: str, old_text: str, new_text: str) -> str:
             # Help the model by showing nearby content
             preview = content[:500] if len(content) > 500 else content
             return f"Error: old_text not found in {path}. File starts with:\n{preview}"
-        if count > 1:
+        if count > 1 and not replace_all:
             return f"Error: old_text found {count} times in {path}. Be more specific to match exactly once."
 
-        new_content = content.replace(old_text, new_text, 1)
+        if replace_all:
+            new_content = content.replace(old_text, new_text)
+        else:
+            new_content = content.replace(old_text, new_text, 1)
         resolved.write_text(new_content)
 
         logger.info(
@@ -169,18 +204,29 @@ async def edit_file(path: str, old_text: str, new_text: str) -> str:
 
 read_file_tool = ToolDef(
     name="read_file",
-    description="Read a file from /data. Path is relative to /data. Supports line offset and limit for partial reads.",
+    description=(
+        "Read a file or directory from /data. Path is relative to /data.\n\n"
+        "Usage:\n"
+        "- By default returns up to 2000 lines from the start of the file.\n"
+        "- The offset parameter is the line number to start from (1-indexed).\n"
+        "- Contents are returned with each line prefixed by its line number as `N: content`.\n"
+        "- For directories, entries are listed one per line with trailing `/` for subdirectories.\n"
+        "- Any line longer than 2000 characters is truncated.\n"
+        "- Use the grep tool to find specific content instead of reading entire large files.\n"
+        "- Use the glob tool to find files by name pattern.\n"
+        "- Avoid tiny repeated slices (30 line chunks). Read a larger window instead."
+    ),
     parameters={
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "File path relative to /data"},
             "offset": {
                 "type": "integer",
-                "description": "Start reading from this line number (1-based, optional)",
+                "description": "Line number to start from (1-indexed)",
             },
             "limit": {
                 "type": "integer",
-                "description": "Max lines to read (default 200, use higher value for more)",
+                "description": "Max lines to read (default 2000)",
             },
         },
         "required": ["path"],
@@ -204,18 +250,32 @@ write_file_tool = ToolDef(
 
 edit_file_tool = ToolDef(
     name="edit_file",
-    description="Edit a file by replacing exact text. Finds old_text and replaces it with new_text. The old_text must match exactly once. For new files use write_file instead.",
+    description=(
+        "Edit a file by replacing exact text. Finds old_text and replaces with new_text.\n\n"
+        "Usage:\n"
+        "- You must read the file first before editing.\n"
+        "- When using text from read_file output, preserve exact indentation but do NOT include "
+        "the line number prefix (the `N: ` part). Everything after the `N: ` is the actual content.\n"
+        "- The old_text must match exactly once, unless replace_all is true.\n"
+        "- Use replace_all for renaming variables or replacing a string everywhere in the file.\n"
+        "- For new files use write_file instead."
+    ),
     parameters={
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "File path relative to /data"},
             "old_text": {
                 "type": "string",
-                "description": "Exact text to find (must appear exactly once)",
+                "description": "Exact text to find",
             },
             "new_text": {
                 "type": "string",
                 "description": "Replacement text (can be empty to delete)",
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "Replace all occurrences (default false)",
+                "default": False,
             },
         },
         "required": ["path", "old_text", "new_text"],

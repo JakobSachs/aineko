@@ -15,6 +15,7 @@ from aineko.schemas.message import IncomingMessage
 @dataclass
 class FakeRoomMessageText:
     """Mimics nio.RoomMessageText for timeline events."""
+
     sender: str
     body: str
     server_timestamp: int  # ms since epoch
@@ -66,6 +67,7 @@ def connector():
 
     import tempfile
     from pathlib import Path
+
     store = Path(tempfile.mkdtemp())
 
     conn = MatrixConnector(settings, store)
@@ -85,20 +87,32 @@ async def test_replay_finds_missed_messages(connector, monkeypatch):
 
     # Patch RoomMessageText isinstance check to match our fakes
     import aineko.matrix.client as client_mod
+
     monkeypatch.setattr(client_mod, "RoomMessageText", FakeRoomMessageText)
 
     # Build a sync response with messages — one old (before our last reply), one new
     sync_resp = FakeSyncResponse(
-        rooms=FakeJoinedRooms(join={
-            "!room:test": FakeRoomInfo(timeline=FakeTimeline(events=[
-                _make_event("@user:test", "old message", ts_offset_sec=-100),
-                _make_event("@user:test", "missed message", ts_offset_sec=100),
-            ]))
-        })
+        rooms=FakeJoinedRooms(
+            join={
+                "!room:test": FakeRoomInfo(
+                    timeline=FakeTimeline(
+                        events=[
+                            _make_event(
+                                "@user:test", "old message", ts_offset_sec=-100
+                            ),
+                            _make_event(
+                                "@user:test", "missed message", ts_offset_sec=100
+                            ),
+                        ]
+                    )
+                )
+            }
+        )
     )
 
     # Mock DB: last assistant reply was at base time (offset 0)
     from datetime import datetime as dt
+
     last_reply = datetime(2026, 3, 25, 12, 0, 0)
 
     async def fake_get_session():
@@ -131,15 +145,26 @@ async def test_replay_skips_own_messages(connector, monkeypatch):
     connector._client.user_id = "@bot:test"
 
     import aineko.matrix.client as client_mod
+
     monkeypatch.setattr(client_mod, "RoomMessageText", FakeRoomMessageText)
 
     sync_resp = FakeSyncResponse(
-        rooms=FakeJoinedRooms(join={
-            "!room:test": FakeRoomInfo(timeline=FakeTimeline(events=[
-                _make_event("@bot:test", "my own message", ts_offset_sec=100),
-                _make_event("@user:test", "user message", ts_offset_sec=200),
-            ]))
-        })
+        rooms=FakeJoinedRooms(
+            join={
+                "!room:test": FakeRoomInfo(
+                    timeline=FakeTimeline(
+                        events=[
+                            _make_event(
+                                "@bot:test", "my own message", ts_offset_sec=100
+                            ),
+                            _make_event(
+                                "@user:test", "user message", ts_offset_sec=200
+                            ),
+                        ]
+                    )
+                )
+            }
+        )
     )
 
     # No previous replies in DB
@@ -171,14 +196,23 @@ async def test_replay_no_messages_when_all_replied(connector, monkeypatch):
     connector._client.user_id = "@bot:test"
 
     import aineko.matrix.client as client_mod
+
     monkeypatch.setattr(client_mod, "RoomMessageText", FakeRoomMessageText)
 
     sync_resp = FakeSyncResponse(
-        rooms=FakeJoinedRooms(join={
-            "!room:test": FakeRoomInfo(timeline=FakeTimeline(events=[
-                _make_event("@user:test", "already handled", ts_offset_sec=-100),
-            ]))
-        })
+        rooms=FakeJoinedRooms(
+            join={
+                "!room:test": FakeRoomInfo(
+                    timeline=FakeTimeline(
+                        events=[
+                            _make_event(
+                                "@user:test", "already handled", ts_offset_sec=-100
+                            ),
+                        ]
+                    )
+                )
+            }
+        )
     )
 
     # Last reply was after the message

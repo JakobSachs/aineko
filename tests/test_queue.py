@@ -52,9 +52,9 @@ async def test_rapid_messages_batched():
     await asyncio.sleep(2)  # wait for debounce
 
     assert len(received) == 1
-    assert "first" in received[0].body
-    assert "second" in received[0].body
-    assert "third" in received[0].body
+    assert "[message 1]: first" in received[0].body
+    assert "[message 2]: second" in received[0].body
+    assert "[message 3]: third" in received[0].body
 
 
 @pytest.mark.asyncio

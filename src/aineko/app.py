@@ -4,11 +4,13 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
 
+from aineko.compaction import compact_messages, should_compact
 from aineko.config import Settings
 from aineko.context import trim_messages
 from aineko.cron.scheduler import CronScheduler
@@ -23,10 +25,19 @@ from aineko.cron.runner import run_cron_job
 from aineko.tools.bash import bash_tool
 from aineko.tools.create_skill import create_skill_tool
 from aineko.tools.files import edit_file_tool, read_file_tool, write_file_tool
-from aineko.tools.registry import ToolDef, ToolRegistry
+from aineko.tools.glob import glob_tool
+from aineko.tools.grep import grep_tool
+from aineko.tools.registry import ToolRegistry
 from aineko.tools.memory import memory_recall_tool
 from aineko.tools import web_search as web_search_mod
+from aineko.tools.search_chat import search_chat_tool
 from aineko.tools.tool_history import search_tool_history_tool
+from aineko.tools.background_task import BackgroundTaskManager
+from aineko.tools.messaging import (
+    make_background_task_tools,
+    make_send_file_tool,
+    make_send_message_tool,
+)
 from aineko.tools.web_search import web_search_tool
 
 logger = logging.getLogger(__name__)
@@ -38,10 +49,13 @@ def build_tools() -> ToolRegistry:
     registry.register(read_file_tool)
     registry.register(write_file_tool)
     registry.register(edit_file_tool)
+    registry.register(glob_tool)
+    registry.register(grep_tool)
     registry.register(web_search_tool)
     registry.register(create_skill_tool)
     registry.register(memory_recall_tool)
     registry.register(search_tool_history_tool)
+    registry.register(search_chat_tool)
     return registry
 
 
@@ -85,6 +99,7 @@ async def handle_message(
     soul_path: Path,
     memory_dir: Path,
     max_context_tokens: int,
+    bg_tasks: BackgroundTaskManager | None = None,
 ) -> None:
     """Core message handler: load session, run agent, send reply."""
     from sqlalchemy import select
@@ -116,37 +131,16 @@ async def handle_message(
     # Track messages sent via the send_message tool
     sent_messages: list[str] = []
 
-    async def _send_message_tool(message: str, room: str = "") -> str:
-        target_room = room or msg.room_id
-        sent_messages.append(message)
-        await matrix.send_message(target_room, message)
-        return "sent"
-
-    # Build per-request tools with send_message bound to this context
+    # Build per-request tools with context-bound messaging tools
     request_tools = ToolRegistry()
     for tool_def in tools._tools.values():
         request_tools.register(tool_def)
-    request_tools.register(
-        ToolDef(
-            name="send_message",
-            description="Send a message to the user. Call this to reply — your response text is NOT automatically sent. Use this for every message you want the user to see.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "The message text to send.",
-                    },
-                    "room": {
-                        "type": "string",
-                        "description": "Room ID to send to (defaults to current room).",
-                    },
-                },
-                "required": ["message"],
-            },
-            handler=_send_message_tool,
-        )
-    )
+    request_tools.register(make_send_message_tool(matrix, msg.room_id, sent_messages))
+    request_tools.register(make_send_file_tool(matrix, msg.room_id))
+
+    if bg_tasks is not None:
+        for tool_def in make_background_task_tools(bg_tasks, msg.room_id, matrix):
+            request_tools.register(tool_def)
 
     async for db in get_session():
         # Get or create session for this room
@@ -181,8 +175,39 @@ async def handle_message(
                 "content": build_system_prompt(skills, soul_path, memory_dir),
             }
         ]
+        import json as _json
+
         for m in history:
-            messages.append({"role": m.role.value, "content": m.content})
+            if m.role == Role.ASSISTANT and m.tool_name == "__has_tool_calls__":
+                # Reconstruct Anthropic content blocks from stored JSON
+                try:
+                    blocks = _json.loads(m.content)
+                    messages.append({"role": "assistant", "content": blocks})
+                except _json.JSONDecodeError:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": m.content}],
+                        }
+                    )
+            elif m.role == Role.TOOL and m.tool_name == "__tool_results__":
+                # Reconstruct tool_result user message from stored JSON
+                try:
+                    blocks = _json.loads(m.content)
+                    messages.append({"role": "user", "content": blocks})
+                except _json.JSONDecodeError:
+                    pass  # skip corrupted tool results
+            elif m.role == Role.ASSISTANT:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": m.content}],
+                    }
+                )
+            elif m.role == Role.SYSTEM:
+                messages.append({"role": "system", "content": m.content})
+            else:
+                messages.append({"role": m.role.value, "content": m.content})
 
         # If current message has an image, make the last user message multimodal
         if msg.image_b64 and msg.image_mime:
@@ -197,7 +222,35 @@ async def handle_message(
                 },
             ]
 
-        # Trim to fit context window
+        # Compact if conversation is getting long (LLM-powered summary)
+        if should_compact(messages, max_context_tokens):
+            logger.info("conversation approaching context limit, compacting")
+            messages = await compact_messages(messages, kimi)
+
+            # Persist the compaction: delete old messages, insert summary
+            # Find messages that were compacted (everything before recent ones)
+            from sqlalchemy import delete as sa_delete
+
+            old_msg_ids = [m.id for m in history[:-4]] if len(history) > 4 else []
+            if old_msg_ids:
+                await db.execute(sa_delete(Message).where(Message.id.in_(old_msg_ids)))
+                # Save the compaction summary to DB
+                summary_msg = [
+                    m
+                    for m in messages
+                    if m.get("role") == "system" and "compacted" in m.get("content", "")
+                ]
+                if summary_msg:
+                    db.add(
+                        Message(
+                            session_id=session.id,
+                            role=Role.SYSTEM,
+                            content=summary_msg[0]["content"],
+                        )
+                    )
+                await db.flush()
+
+        # Trim as safety net (in case compaction wasn't enough)
         messages = trim_messages(messages, max_context_tokens)
 
         # Run agent loop
@@ -207,20 +260,72 @@ async def handle_message(
         if response.content:
             await matrix.send_message(msg.room_id, response.content)
 
-        # Save what the user saw as the assistant message
-        all_visible = sent_messages.copy()
-        if response.content:
-            all_visible.append(response.content)
-        visible = "\n".join(all_visible) if all_visible else ""
-        if visible:
+        # Persist conversation in Anthropic-reconstructable format.
+        # If tools were called, save: assistant (with tool_use refs) + tool results + final text.
+        # This lets us rebuild proper content blocks when loading history.
+        import json as _json
+
+        if response.tool_history:
+            # Save assistant message with tool call metadata as JSON content blocks
+            assistant_blocks: list[dict[str, Any]] = []
+            # Include any intermediate send_message content
+            for sm in sent_messages:
+                assistant_blocks.append({"type": "text", "text": sm})
+            for rec in response.tool_history:
+                assistant_blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": f"persisted_{rec.tool_name}_{id(rec)}",
+                        "name": rec.tool_name,
+                        "input": _json.loads(rec.arguments) if rec.arguments else {},
+                    }
+                )
+            if response.content:
+                assistant_blocks.append({"type": "text", "text": response.content})
             db.add(
                 Message(
                     session_id=session.id,
                     role=Role.ASSISTANT,
-                    content=visible,
+                    # Store as JSON so we can reconstruct content blocks on load
+                    content=_json.dumps(assistant_blocks),
                     token_count=response.usage.get("total_tokens"),
+                    tool_name="__has_tool_calls__",  # marker
                 )
             )
+
+            # Save tool results as a single "tool" role message with JSON content blocks
+            result_blocks: list[dict[str, Any]] = []
+            for rec in response.tool_history:
+                result_blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": f"persisted_{rec.tool_name}_{id(rec)}",
+                        "content": rec.result[:2000],  # cap stored results
+                    }
+                )
+            db.add(
+                Message(
+                    session_id=session.id,
+                    role=Role.TOOL,
+                    content=_json.dumps(result_blocks),
+                    tool_name="__tool_results__",  # marker
+                )
+            )
+        else:
+            # No tool calls — save plain assistant message
+            all_visible = sent_messages.copy()
+            if response.content:
+                all_visible.append(response.content)
+            visible = "\n".join(all_visible) if all_visible else ""
+            if visible:
+                db.add(
+                    Message(
+                        session_id=session.id,
+                        role=Role.ASSISTANT,
+                        content=visible,
+                        token_count=response.usage.get("total_tokens"),
+                    )
+                )
 
         # Persist tool call history
         for rec in response.tool_history:
@@ -279,13 +384,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             )
     max_ctx = settings.kimi.max_context_tokens
 
+    # Background task manager
+    bg_task_mgr = BackgroundTaskManager()
+
     # Matrix
     matrix = MatrixConnector(
         settings.matrix, store_path=settings.data_dir / "crypto_store"
     )
     matrix.on_message(
         lambda msg: handle_message(
-            msg, kimi, tools, skills, matrix, soul_path, memory_dir, max_ctx
+            msg,
+            kimi,
+            tools,
+            skills,
+            matrix,
+            soul_path,
+            memory_dir,
+            max_ctx,
+            bg_task_mgr,
         )
     )
 
@@ -350,33 +466,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                     hb_tools = ToolRegistry()
                     for tool_def in tools._tools.values():
                         hb_tools.register(tool_def)
-
-                    async def _hb_send(message: str, room: str = "") -> str:
-                        target = room or heartbeat_room
-                        if target:
-                            await matrix.send_message(target, message)
-                        return "sent"
-
                     hb_tools.register(
-                        ToolDef(
-                            name="send_message",
-                            description="Send a message to the user.",
-                            parameters={
-                                "type": "object",
-                                "properties": {
-                                    "message": {
-                                        "type": "string",
-                                        "description": "The message text to send.",
-                                    },
-                                    "room": {
-                                        "type": "string",
-                                        "description": "Room ID (defaults to heartbeat room).",
-                                    },
-                                },
-                                "required": ["message"],
-                            },
-                            handler=_hb_send,
-                        )
+                        make_send_message_tool(matrix, heartbeat_room, [])
                     )
 
                     response = await kimi.chat_loop(messages, hb_tools)

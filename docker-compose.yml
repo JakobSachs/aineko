@@ -5,7 +5,17 @@ services:
     volumes:
       - ./data:/data
       - ~/Obsidian:/data/vault:ro
+      - /opt/rocm:/opt/rocm:ro
+      - /usr/lib/x86_64-linux-gnu/libstdc++.so.6:/usr/lib/x86_64-linux-gnu/libstdc++.so.6:ro
     ports:
       - "8080:8080"
     env_file:
       - .env
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd
+    group_add:
+      - keep-groups
+    security_opt:
+      - label=disable  # sometimes needed for amdgpu
+

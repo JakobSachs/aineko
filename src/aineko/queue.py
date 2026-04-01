@@ -85,8 +85,9 @@ class MessageQueue:
                 # Single message, pass directly
                 msg = batch[0]
             else:
-                # Combine multiple messages into one
-                combined_body = "\n".join(m.body for m in batch)
+                # Combine multiple messages into one, clearly separated
+                parts = [f"[message {i+1}]: {m.body}" for i, m in enumerate(batch)]
+                combined_body = "\n".join(parts)
                 # Use the last message as the base (most recent timestamp, may have image)
                 msg = batch[-1].model_copy(update={"body": combined_body})
                 logger.info(

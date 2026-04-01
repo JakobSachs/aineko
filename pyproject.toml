@@ -13,6 +13,7 @@ dependencies = [
     "apscheduler>=3.10,<4",
     "fastapi>=0.115,<1",
     "httpx>=0.28,<1",
+    "markdown-it-py>=3.0,<4",
     "matrix-nio[e2e]>=0.25,<1",
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.7,<3",

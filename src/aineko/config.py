@@ -24,10 +24,14 @@ class KimiSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KIMI_")
 
     api_key: str = ""
-    model: str = "kimi-latest"
+    model: str = "kimi-k2.5"
     base_url: str = "https://api.moonshot.cn/v1"
-    max_context_tokens: int = 128_000
+    max_context_tokens: int = 262_144
     user_agent: str = ""  # required for some endpoints (e.g. Kimi coding API)
+    thinking: bool = True  # enable reasoning mode (kimi-k2.5, kimi-k2-thinking)
+    temperature: float = 1.0  # 1.0 for thinking models, 0.6 for non-thinking
+    top_p: float = 0.95  # recommended for kimi-k2.5
+    max_tokens: int = 32_000  # output token limit
 
 
 class HeartbeatSettings(BaseSettings):

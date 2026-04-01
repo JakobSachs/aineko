@@ -5,7 +5,6 @@ import pytest
 from aineko.tools import web_search as web_search_mod
 from aineko.tools.web_search import web_search
 
-
 FAKE_BRAVE_RESPONSE = {
     "web": {
         "results": [

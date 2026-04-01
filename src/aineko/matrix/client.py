@@ -21,6 +21,8 @@ from nio import (
     RoomMessageText,
 )
 
+import mimetypes
+
 from aineko.config import MatrixSettings
 from aineko.queue import MessageQueue
 from aineko.schemas.message import IncomingMessage
@@ -28,6 +30,8 @@ from aineko.schemas.message import IncomingMessage
 logger = logging.getLogger(__name__)
 
 MessageHandler = Callable[[IncomingMessage], Coroutine[Any, Any, None]]
+
+_SEND_FILE_DATA_ROOT = Path("/data")
 
 # File to persist login credentials (device_id + access_token) across restarts
 _CREDS_FILE = "credentials.json"
@@ -62,6 +66,24 @@ class MatrixConnector:
     def on_message(self, handler: MessageHandler) -> None:
         self._handler = handler
         self._queue = MessageQueue(handler)
+
+    async def inject_message(
+        self, room_id: str, body: str, sender: str = "system"
+    ) -> None:
+        """Inject a synthetic message into the processing queue."""
+        if self._queue is None:
+            logger.warning("inject_message called before queue initialized")
+            return
+        from datetime import datetime, timezone
+
+        msg = IncomingMessage(
+            room_id=room_id,
+            sender=sender,
+            body=body,
+            timestamp=datetime.now(timezone.utc),
+            event_id=f"$injected-{id(body)}",
+        )
+        await self._queue.enqueue(msg)
 
     async def start(self) -> None:
         self._running = True
@@ -185,12 +207,20 @@ class MatrixConnector:
                 "body": body[:500],
             },
         )
+        body = body.strip()
+        if not body:
+            return
         chunks = _chunk_message(body, max_len=4096)
         for chunk in chunks:
+            content: dict[str, str] = {"msgtype": "m.text", "body": chunk}
+            html = _markdown_to_html(chunk)
+            if html != chunk:
+                content["format"] = "org.matrix.custom.html"
+                content["formatted_body"] = html
             await self._client.room_send(
                 room_id=room_id,
                 message_type="m.room.message",
-                content={"msgtype": "m.text", "body": chunk},
+                content=content,
             )
 
     async def _replay_missed_messages(self, sync_response: Any) -> None:
@@ -207,7 +237,9 @@ class MatrixConnector:
         if not hasattr(sync_response.rooms, "join"):
             return
 
-        rooms_to_check = self._settings.room_list or list(sync_response.rooms.join.keys())
+        rooms_to_check = self._settings.room_list or list(
+            sync_response.rooms.join.keys()
+        )
 
         for room_id in rooms_to_check:
             room_data = sync_response.rooms.join.get(room_id)
@@ -236,14 +268,18 @@ class MatrixConnector:
                     event.server_timestamp / 1000, tz=timezone.utc
                 )
                 # Skip if we already replied after this message
-                if last_reply_ts and event_ts <= last_reply_ts.replace(tzinfo=timezone.utc):
+                if last_reply_ts and event_ts <= last_reply_ts.replace(
+                    tzinfo=timezone.utc
+                ):
                     continue
                 missed.append((event, event_ts))
 
             if not missed:
                 continue
 
-            logger.info("Matrix: found %d missed message(s) in %s", len(missed), room_id)
+            logger.info(
+                "Matrix: found %d missed message(s) in %s", len(missed), room_id
+            )
             for event, event_ts in missed:
                 if self._queue is None:
                     break
@@ -463,6 +499,18 @@ class MatrixConnector:
                 logger.info("Trusted device %s for %s", device.device_id, user_id)
 
 
+def _markdown_to_html(text: str) -> str:
+    """Convert markdown to HTML for Matrix formatted_body."""
+    from markdown_it import MarkdownIt
+
+    md = MarkdownIt()
+    html = md.render(text).strip()
+    # If the result is just a single <p>...</p>, unwrap it for simple messages
+    if html.startswith("<p>") and html.endswith("</p>") and html.count("<p>") == 1:
+        html = html[3:-4]
+    return html
+
+
 def _chunk_message(text: str, max_len: int = 4096) -> list[str]:
     """Split a long message into chunks, preferring line breaks."""
     if len(text) <= max_len:
@@ -479,3 +527,76 @@ def _chunk_message(text: str, max_len: int = 4096) -> list[str]:
         chunks.append(text[:cut])
         text = text[cut:].lstrip("\n")
     return chunks
+
+
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+async def send_file(
+    connector: "MatrixConnector",
+    room_id: str,
+    path: str,
+    filename: str = "",
+) -> str:
+    """Upload a file from /data to a Matrix room.
+
+    Args:
+        connector: MatrixConnector instance.
+        room_id: Target room.
+        path: File path relative to /data.
+        filename: Override display filename (defaults to basename).
+    """
+    resolved = (_SEND_FILE_DATA_ROOT / path).resolve()
+    if not str(resolved).startswith(str(_SEND_FILE_DATA_ROOT)):
+        return f"Error: path escapes data directory: {path}"
+    if not resolved.is_file():
+        return f"Error: file not found: {path}"
+
+    display_name = filename or resolved.name
+    file_size = resolved.stat().st_size
+    mime, _ = mimetypes.guess_type(resolved.name)
+    mime = mime or "application/octet-stream"
+
+    import io
+
+    data = io.BytesIO(resolved.read_bytes())
+
+    resp, _ = await connector._client.upload(
+        data,
+        content_type=mime,
+        filename=display_name,
+        filesize=file_size,
+    )
+
+    if not hasattr(resp, "content_uri"):
+        return f"Error: upload failed: {getattr(resp, 'message', resp)}"
+
+    msgtype = "m.image" if resolved.suffix.lower() in _IMAGE_EXTENSIONS else "m.file"
+
+    content: dict[str, Any] = {
+        "msgtype": msgtype,
+        "body": display_name,
+        "url": resp.content_uri,
+        "info": {
+            "mimetype": mime,
+            "size": file_size,
+        },
+    }
+
+    await connector._client.room_send(
+        room_id=room_id,
+        message_type="m.room.message",
+        content=content,
+    )
+
+    logger.info(
+        "file sent",
+        extra={
+            "event": "file_out",
+            "room": room_id,
+            "filename": display_name,
+            "size": file_size,
+            "mimetype": mime,
+        },
+    )
+    return f"Sent {display_name} ({file_size} bytes) to room"
