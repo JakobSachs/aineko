@@ -45,6 +45,14 @@ class HeartbeatSettings(BaseSettings):
     room: str = ""  # defaults to first matrix room if empty
 
 
+class CalDavSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="CALDAV_")
+
+    url: str = "https://caldav.icloud.com"
+    username: str = ""  # Apple ID email
+    password: str = ""  # App-specific password
+
+
 class CronSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CRON_")
 
@@ -66,6 +74,7 @@ class Settings(BaseSettings):
     matrix: MatrixSettings = Field(default_factory=MatrixSettings)
     kimi: KimiSettings = Field(default_factory=KimiSettings)
     heartbeat: HeartbeatSettings = Field(default_factory=HeartbeatSettings)
+    caldav: CalDavSettings = Field(default_factory=CalDavSettings)
     cron: CronSettings = Field(default_factory=CronSettings)
 
     @property

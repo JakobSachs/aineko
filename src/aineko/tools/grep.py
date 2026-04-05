@@ -20,6 +20,7 @@ def _resolve_path(path: str) -> Path:
 
 async def grep_files(pattern: str, path: str = "", include: str = "") -> str:
     """Search file contents using ripgrep."""
+    proc: asyncio.subprocess.Process | None = None
     try:
         search_dir = _resolve_path(path) if path else DATA_ROOT
 
@@ -109,9 +110,26 @@ async def grep_files(pattern: str, path: str = "", include: str = "") -> str:
 
         return "\n".join(result_lines)
     except asyncio.TimeoutError:
+        if proc is not None:
+            proc.kill()
+            try:
+                await proc.communicate()
+            except Exception:
+                pass
         return "Grep timed out after 30s"
     except Exception as e:
         return f"Error: {e}"
+    finally:
+        # Explicitly close the subprocess transport so its resources are
+        # released while the event loop is still running. Prevents
+        # BaseSubprocessTransport.__del__ from firing later on a closed loop
+        # (seen with Hypothesis property tests that create a new loop per
+        # example). The isinstance guard is so unit tests that pass an
+        # AsyncMock aren't affected.
+        if isinstance(proc, asyncio.subprocess.Process):
+            transport = getattr(proc, "_transport", None)
+            if transport is not None:
+                transport.close()
 
 
 grep_tool = ToolDef(

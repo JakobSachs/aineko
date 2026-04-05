@@ -1,8 +1,7 @@
 """Tests for Anthropic Messages API format (Kimi Coding endpoint)."""
 
-import json
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock
 
 from aineko.kimi.client import KimiClient, ChatResponse, ToolCall
 from aineko.tools.registry import ToolDef, ToolRegistry

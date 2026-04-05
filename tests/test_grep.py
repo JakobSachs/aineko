@@ -1,8 +1,65 @@
 """Tests for grep tool."""
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from aineko.tools.grep import grep_files
+
+# --- Property-based tests ---
+
+
+class TestGrepProperties:
+    @given(pattern=st.text(min_size=1, max_size=100))
+    @settings(max_examples=20)
+    @pytest.mark.asyncio
+    async def test_never_crashes_on_arbitrary_pattern(self, pattern: str):
+        """Any pattern string returns a string, never raises."""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / "file.txt").write_text("some content\n")
+            with patch("aineko.tools.grep.DATA_ROOT", tmp):
+                result = await grep_files(pattern)
+            assert isinstance(result, str)
+
+    @given(path=st.text(min_size=1, max_size=50))
+    @settings(max_examples=20)
+    @pytest.mark.asyncio
+    async def test_never_crashes_on_arbitrary_path(self, path: str):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            with patch("aineko.tools.grep.DATA_ROOT", tmp):
+                result = await grep_files("test", path=path)
+            assert isinstance(result, str)
+
+    @given(include=st.text(min_size=0, max_size=50))
+    @settings(max_examples=20)
+    @pytest.mark.asyncio
+    async def test_never_crashes_on_arbitrary_include(self, include: str):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / "file.txt").write_text("content\n")
+            with patch("aineko.tools.grep.DATA_ROOT", tmp):
+                result = await grep_files("content", include=include)
+            assert isinstance(result, str)
+
+
+# --- Example-based tests ---
 
 
 @pytest.fixture
@@ -90,3 +147,125 @@ async def test_grep_long_lines_truncated(data_dir):
     result = await grep_files("prefix")
     # The matched line should be truncated
     assert len(result) < 3500
+
+
+@pytest.mark.asyncio
+async def test_grep_max_results_truncation(data_dir, monkeypatch):
+    """When matches exceed MAX_RESULTS, output is truncated with a note."""
+    import aineko.tools.grep as mod
+
+    monkeypatch.setattr(mod, "MAX_RESULTS", 5)
+
+    for i in range(20):
+        (data_dir / f"file_{i:03d}.py").write_text(f"target line {i}\n")
+
+    result = await grep_files("target")
+    assert "truncated" in result.lower() or "showing" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_grep_empty_output_after_parse(data_dir):
+    """Lines that don't parse into file:line:content are skipped."""
+    # A file whose content won't match rg's output format after grep
+    (data_dir / "test.txt").write_text("no match here\n")
+    result = await grep_files("zzz_nonexistent_pattern")
+    assert "No files found" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_path_traversal_blocked(data_dir):
+    result = await grep_files("test", path="../../etc")
+    assert "Error" in result or "escapes" in result.lower()
+
+
+# --- Mocked subprocess tests for parsing edge cases ---
+
+
+def _mock_rg(stdout: bytes, returncode: int = 0):
+    """Create a mock subprocess with controlled rg output."""
+    proc = AsyncMock()
+    proc.communicate.return_value = (stdout, b"")
+    proc.returncode = returncode
+    return proc
+
+
+@pytest.mark.asyncio
+async def test_grep_empty_stdout_after_success(data_dir):
+    """rg returns exit 0 but stdout is empty/whitespace."""
+    proc = _mock_rg(b"   \n  ", returncode=0)
+    with patch("aineko.tools.grep.asyncio.create_subprocess_exec", return_value=proc):
+        result = await grep_files("pattern")
+    assert "No files found" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_colon_fallback_parsing(data_dir):
+    """Lines without | separator fall back to colon-split."""
+    # rg output with colons instead of pipes
+    stdout = b"/data/file.py:10:some matching content\n"
+    proc = _mock_rg(stdout)
+    with patch("aineko.tools.grep.asyncio.create_subprocess_exec", return_value=proc):
+        result = await grep_files("matching")
+    assert "Line 10" in result
+    assert "some matching content" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_unparseable_lines_skipped(data_dir):
+    """Lines with <3 parts after both splits are silently skipped."""
+    stdout = b"just-a-bare-line\nanother bare line\n"
+    proc = _mock_rg(stdout)
+    with patch("aineko.tools.grep.asyncio.create_subprocess_exec", return_value=proc):
+        result = await grep_files("pattern")
+    assert "No files found" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_invalid_linenum_skipped(data_dir):
+    """Lines where the line number field isn't an integer are skipped."""
+    stdout = b"/data/file.py|notanum|content here\n/data/file.py|5|valid line\n"
+    proc = _mock_rg(stdout)
+    with patch("aineko.tools.grep.asyncio.create_subprocess_exec", return_value=proc):
+        result = await grep_files("pattern")
+    assert "valid line" in result
+    assert "Found 1" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_all_lines_unparseable(data_dir):
+    """If every line fails parsing, by_file is empty."""
+    stdout = b"garbage\nmore garbage\nno-separators-at-all\n"
+    proc = _mock_rg(stdout)
+    with patch("aineko.tools.grep.asyncio.create_subprocess_exec", return_value=proc):
+        result = await grep_files("pattern")
+    assert "No files found" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_inner_max_results_break(data_dir, monkeypatch):
+    """MAX_RESULTS cap fires mid-file when one file has many matches."""
+    import aineko.tools.grep as mod
+
+    monkeypatch.setattr(mod, "MAX_RESULTS", 3)
+
+    # One file with 10 matches
+    lines = [f"/data/big.py|{i}|match line {i}" for i in range(1, 11)]
+    stdout = "\n".join(lines).encode() + b"\n"
+    proc = _mock_rg(stdout)
+    with patch("aineko.tools.grep.asyncio.create_subprocess_exec", return_value=proc):
+        result = await grep_files("match")
+    assert "showing" in result.lower() or "truncated" in result.lower()
+    # Only 3 "Line N:" entries should appear
+    assert result.count("Line ") == 3
+
+
+@pytest.mark.asyncio
+async def test_grep_timeout(data_dir):
+    """TimeoutError is caught and returns a message."""
+    proc = AsyncMock()
+    proc.communicate.side_effect = asyncio.TimeoutError()
+    proc.kill = MagicMock()
+    with patch("aineko.tools.grep.asyncio.create_subprocess_exec", return_value=proc):
+        result = await grep_files("pattern")
+    assert "timed out" in result.lower()
+    proc.kill.assert_called_once()

@@ -59,3 +59,25 @@ async def test_web_search_no_api_key(monkeypatch):
     result = await web_search("test")
 
     assert "not configured" in result
+
+
+@pytest.mark.asyncio
+async def test_web_search_http_error(httpx_mock):
+    """HTTP errors return an error string, not an exception."""
+    httpx_mock.add_response(status_code=500)
+
+    result = await web_search("test query")
+
+    assert "error" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_web_search_network_error(httpx_mock):
+    """Network failures return an error string."""
+    import httpx
+
+    httpx_mock.add_exception(httpx.ConnectError("connection refused"))
+
+    result = await web_search("test query")
+
+    assert "error" in result.lower()

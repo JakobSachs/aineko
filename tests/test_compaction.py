@@ -7,10 +7,7 @@ from aineko.compaction import (
     should_compact,
     build_compaction_prompt,
     compact_messages,
-    COMPACTION_RESERVE,
-    COMPACTION_TEMPLATE,
 )
-from aineko.context import estimate_tokens
 
 # --- should_compact ---
 
@@ -153,7 +150,6 @@ async def test_compact_messages_preserves_system():
 @pytest.mark.asyncio
 async def test_compact_messages_too_short_returns_unchanged():
     """If there aren't enough messages to compact, return unchanged."""
-    from aineko.kimi.client import ChatResponse
 
     mock_kimi = MagicMock()
 

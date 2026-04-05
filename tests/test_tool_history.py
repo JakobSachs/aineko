@@ -1,7 +1,6 @@
 """Tests for tool history logging and search."""
 
 import pytest
-from datetime import datetime
 
 from aineko.kimi.client import ToolCallRecord
 
@@ -30,7 +29,7 @@ def test_tool_call_record_in_list():
 @pytest.mark.asyncio
 async def test_chat_loop_returns_tool_history():
     """chat_loop should accumulate tool call records and return them."""
-    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import MagicMock
     from aineko.kimi.client import ChatResponse, KimiClient, ToolCall
     from aineko.tools.registry import ToolRegistry
 

@@ -1,6 +1,5 @@
 """Tests for checkpoint-based tool loop (progress updates instead of hard stop)."""
 
-import json
 import pytest
 from unittest.mock import MagicMock
 
@@ -144,7 +143,7 @@ async def test_checkpoint_sends_update_via_send_message():
 
     client.chat = mock_chat
 
-    result = await client.chat_loop(
+    await client.chat_loop(
         [{"role": "user", "content": "go"}],
         registry,
         checkpoint_every=3,

@@ -66,6 +66,10 @@ class MessageQueue:
             await asyncio.sleep(DEBOUNCE_MS / 1000)
         except asyncio.CancelledError:
             return  # new message arrived, debounce reset
+        # Remove ourselves from the cancellable debounce map.  Once the sleep
+        # phase is over we are an *active handler* — enqueue() must not cancel
+        # an in-progress drain (which would kill the running LLM request).
+        self._debounce_tasks.pop(room, None)
         await self._drain(room)
 
     async def _drain(self, room: str) -> None:

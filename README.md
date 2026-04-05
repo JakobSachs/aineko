@@ -26,7 +26,7 @@ The service unit lives at `~/.config/systemd/user/aineko.service` and is enabled
 
 ```bash
 # Run tests
-uv run pytest
+uv run pytest -n4
 
 # Run locally (without container)
 uv run aineko

@@ -130,7 +130,7 @@ class KimiClient:
         for attempt in range(max_retries + 1):
             try:
                 resp = await self._http.post("/messages", json=payload)
-            except httpx.TimeoutException as exc:
+            except httpx.TimeoutException:
                 if attempt < max_retries:
                     delay = 2**attempt
                     logger.warning(

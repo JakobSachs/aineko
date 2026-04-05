@@ -8,6 +8,7 @@ MAX_OUTPUT = 10_000  # chars
 
 
 async def run_bash(command: str, timeout: int = 60, description: str = "") -> str:
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -24,10 +25,28 @@ async def run_bash(command: str, timeout: int = 60, description: str = "") -> st
         exit_info = f"\n[exit code: {proc.returncode}]"
         return output + exit_info
     except asyncio.TimeoutError:
-        proc.kill()
+        if proc is not None:
+            proc.kill()
+            # Drain pipes so the subprocess transport closes cleanly instead
+            # of being finalized later via __del__ on a possibly-closed loop.
+            try:
+                await proc.communicate()
+            except Exception:
+                pass
         return f"Command timed out after {timeout}s"
     except Exception as e:
         return f"Error: {e}"
+    finally:
+        # Explicitly close the subprocess transport before returning so its
+        # resources are released while the event loop is still running. This
+        # prevents BaseSubprocessTransport.__del__ from firing later on a
+        # closed loop (seen with Hypothesis property tests that create a new
+        # loop per example). The isinstance guard is so unit tests that pass
+        # an AsyncMock aren't affected.
+        if isinstance(proc, asyncio.subprocess.Process):
+            transport = getattr(proc, "_transport", None)
+            if transport is not None:
+                transport.close()
 
 
 bash_tool = ToolDef(

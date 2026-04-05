@@ -60,15 +60,11 @@ async def test_glob_truncates_at_100(data_dir):
     result = await glob_files("*.txt")
     # Should mention truncation
     assert "100" in result
-    # Should not have all 150
-    lines = [
-        l
-        for l in result.strip().splitlines()
-        if l.startswith("/") or not l.startswith("(")
-    ]
     # The non-note lines should be <= 100
     file_lines = [
-        l for l in result.strip().splitlines() if not l.startswith("(") and l.strip()
+        line
+        for line in result.strip().splitlines()
+        if not line.startswith("(") and line.strip()
     ]
     assert len(file_lines) <= 100
 
@@ -81,3 +77,16 @@ async def test_glob_returns_absolute_paths(data_dir):
     for line in result.strip().splitlines():
         if line and not line.startswith("("):
             assert line.startswith("/")
+
+
+@pytest.mark.asyncio
+async def test_glob_path_traversal_blocked(data_dir):
+    result = await glob_files("*.py", path="../../etc")
+    assert "Error" in result or "escapes" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_glob_invalid_pattern(data_dir):
+    """Invalid glob pattern returns error, not exception."""
+    result = await glob_files("[invalid")
+    assert isinstance(result, str)

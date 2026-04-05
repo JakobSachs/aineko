@@ -16,6 +16,7 @@ _orig_run_bash = bash_mod.run_bash
 
 
 async def _test_run_bash(command: str, timeout: int = 60) -> str:
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -27,8 +28,20 @@ async def _test_run_bash(command: str, timeout: int = 60) -> str:
         output = stdout.decode(errors="replace")
         return output + f"\n[exit code: {proc.returncode}]"
     except asyncio.TimeoutError:
-        proc.kill()
+        if proc is not None:
+            proc.kill()
+            try:
+                await proc.communicate()
+            except Exception:
+                pass
         return f"Command timed out after {timeout}s"
+    finally:
+        # Release the subprocess transport eagerly so its finalizer doesn't
+        # fire later on an already-closed event loop.
+        if isinstance(proc, asyncio.subprocess.Process):
+            transport = getattr(proc, "_transport", None)
+            if transport is not None:
+                transport.close()
 
 
 @pytest.fixture(autouse=True)
@@ -151,6 +164,62 @@ async def test_timeout_kills_task():
     await record.asyncio_task
     assert record.finished
     assert "timed out" in record.result.lower() or "error" in record.result.lower()
+
+
+@pytest.mark.asyncio
+async def test_get_task():
+    """get() returns a record by ID, or None."""
+    mgr = BackgroundTaskManager()
+    r = mgr.spawn(command="echo hi", label="test", room_id="!r:t")
+    assert mgr.get(r.id) is r
+    assert mgr.get("nonexistent") is None
+    await r.asyncio_task
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_elapsed_minutes():
+    """Elapsed time over 60s is shown in minutes."""
+    mgr = BackgroundTaskManager()
+    r = mgr.spawn(command="echo hi", label="old", room_id="!r:t")
+    # Backdate the creation time
+    r.created_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    tasks = mgr.list_tasks()
+    assert any("m" in t["elapsed"] for t in tasks)
+    r.asyncio_task.cancel()
+    try:
+        await r.asyncio_task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_spawn_error_path():
+    """When _run raises, result captures the error and inject_fn is still called."""
+    injected = []
+
+    async def fake_inject(task_id, label, result):
+        injected.append(result)
+
+    mgr = BackgroundTaskManager()
+    # Patch run_bash to raise inside the task
+    import aineko.tools.bash as bmod
+
+    original = bmod.run_bash
+
+    async def exploding_bash(command, timeout=60, **kw):
+        raise RuntimeError("kaboom")
+
+    bmod.run_bash = exploding_bash
+    try:
+        r = mgr.spawn(
+            command="anything", label="boom", room_id="!r:t", inject_fn=fake_inject
+        )
+        await r.asyncio_task
+        assert r.finished
+        assert "kaboom" in r.result
+        assert len(injected) == 1
+    finally:
+        bmod.run_bash = original
 
 
 @pytest.mark.asyncio

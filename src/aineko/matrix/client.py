@@ -36,6 +36,51 @@ _SEND_FILE_DATA_ROOT = Path("/data")
 # File to persist login credentials (device_id + access_token) across restarts
 _CREDS_FILE = "credentials.json"
 
+# Fields that make a credentials file "complete" enough to restore a session.
+_REQUIRED_CREDS = ("access_token", "device_id", "user_id")
+
+
+def _load_credentials(creds_path: Path) -> dict[str, str]:
+    """Load saved Matrix credentials, returning an empty dict on any issue.
+
+    If the file exists but is missing required auth fields, it is deleted so
+    a fresh login path can run. This prevents a stale file (e.g. one holding
+    only a ``next_batch`` token from a previous run) from causing a KeyError
+    in the background sync task and silently killing the Matrix connection.
+    """
+    if not creds_path.exists():
+        return {}
+    try:
+        creds = json.loads(creds_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        logger.warning("Matrix: failed to read credentials file, ignoring")
+        creds_path.unlink(missing_ok=True)
+        return {}
+    if not all(k in creds for k in _REQUIRED_CREDS):
+        logger.warning("Matrix: incomplete credentials file, ignoring")
+        creds_path.unlink(missing_ok=True)
+        return {}
+    return creds
+
+
+def _write_credentials(
+    creds_path: Path,
+    *,
+    user_id: str,
+    device_id: str,
+    access_token: str,
+    next_batch: str | None = None,
+) -> None:
+    """Write a complete credentials file (optionally with a sync token)."""
+    creds: dict[str, str] = {
+        "user_id": user_id,
+        "device_id": device_id,
+        "access_token": access_token,
+    }
+    if next_batch:
+        creds["next_batch"] = next_batch
+    creds_path.write_text(json.dumps(creds))
+
 
 class MatrixConnector:
     def __init__(self, settings: MatrixSettings, store_path: Path) -> None:
@@ -90,11 +135,14 @@ class MatrixConnector:
 
         # Try to restore saved credentials, otherwise do a fresh login
         creds_path = self._store_path / _CREDS_FILE
-        if creds_path.exists():
-            creds = json.loads(creds_path.read_text())
+        creds = _load_credentials(creds_path)
+
+        if creds:
             self._client.access_token = creds["access_token"]
             self._client.device_id = creds["device_id"]
             self._client.user_id = creds["user_id"]
+            if "next_batch" in creds:
+                self._client.next_batch = creds["next_batch"]
             logger.info("Matrix: restored session, device_id=%s", creds["device_id"])
         elif self._settings.password:
             logger.info("Matrix: logging in with password...")
@@ -104,15 +152,11 @@ class MatrixConnector:
             )
             if isinstance(resp, LoginResponse):
                 logger.info("Matrix: logged in, device_id=%s", resp.device_id)
-                # Save credentials for next restart
-                creds_path.write_text(
-                    json.dumps(
-                        {
-                            "user_id": resp.user_id,
-                            "device_id": resp.device_id,
-                            "access_token": resp.access_token,
-                        }
-                    )
+                _write_credentials(
+                    creds_path,
+                    user_id=resp.user_id,
+                    device_id=resp.device_id,
+                    access_token=resp.access_token,
                 )
             else:
                 logger.error("Matrix: login failed: %s", resp)
@@ -133,6 +177,14 @@ class MatrixConnector:
             logger.info(
                 "Matrix: using access token, device_id=%s", self._client.device_id
             )
+            # Persist a complete credentials file so sync tokens can be saved
+            # alongside auth on subsequent runs.
+            _write_credentials(
+                creds_path,
+                user_id=self._client.user_id,
+                device_id=self._client.device_id,
+                access_token=self._settings.access_token,
+            )
         else:
             logger.error("Matrix: no password or access_token configured")
             return
@@ -147,12 +199,16 @@ class MatrixConnector:
         if not self._client.olm:
             logger.warning("Matrix: olm not initialized, E2EE disabled")
 
-        # Register non-message callbacks before initial sync
+        # Register all callbacks before sync so no events are missed
         self._client.add_event_callback(self._on_megolm_event, MegolmEvent)
         self._client.add_to_device_callback(self._on_key_request, RoomKeyRequest)
         self._client.add_event_callback(self._on_invite, InviteMemberEvent)
+        self._client.add_event_callback(self._on_room_message, RoomMessageText)
+        self._client.add_event_callback(self._on_room_file, RoomMessageFile)
+        self._client.add_event_callback(self._on_room_file, RoomMessageImage)
 
-        # Initial sync — get room state without processing messages yet
+        # Initial sync — if we have a next_batch token from a previous session,
+        # nio will only return events after that point (no replay needed).
         logger.info("Matrix: initial sync...")
         resp = await self._client.sync(timeout=10_000, full_state=True)
 
@@ -161,15 +217,8 @@ class MatrixConnector:
             logger.info("Matrix: auto-joining room %s", room_id)
             await self._client.join(room_id)
 
-        # Find missed messages: scan timeline from initial sync for unprocessed events
-        await self._replay_missed_messages(resp)
-
-        # Now register message callbacks for live messages going forward
-        if hasattr(resp, "next_batch"):
-            self._client.next_batch = resp.next_batch
-        self._client.add_event_callback(self._on_room_message, RoomMessageText)
-        self._client.add_event_callback(self._on_room_file, RoomMessageFile)
-        self._client.add_event_callback(self._on_room_file, RoomMessageImage)
+        # Persist next_batch so the next restart picks up where we left off
+        self._save_sync_token()
 
         logger.info("Matrix: initial sync done, listening for messages")
 
@@ -181,6 +230,7 @@ class MatrixConnector:
             try:
                 self._sync_task = asyncio.current_task()
                 await self._client.sync(timeout=30_000)
+                self._save_sync_token()
                 await self._trust_all_devices()
             except asyncio.CancelledError:
                 logger.info("Matrix: sync loop cancelled")
@@ -190,10 +240,27 @@ class MatrixConnector:
                 await asyncio.sleep(5)
         self._sync_task = None
 
+    def _save_sync_token(self) -> None:
+        """Persist next_batch token so the next restart resumes from here.
+
+        Only updates an existing complete credentials file. Never writes a
+        partial file with only a sync token, since that would cause the next
+        startup to fail loading auth.
+        """
+        if not self._client.next_batch:
+            return
+        creds_path = self._store_path / _CREDS_FILE
+        creds = _load_credentials(creds_path)
+        if not creds:
+            return
+        creds["next_batch"] = self._client.next_batch
+        creds_path.write_text(json.dumps(creds))
+
     async def stop(self) -> None:
         self._running = False
         if self._sync_task and not self._sync_task.done():
             self._sync_task.cancel()
+        self._save_sync_token()
         await self._client.close()
         logger.info("Matrix: disconnected")
 
@@ -222,84 +289,6 @@ class MatrixConnector:
                 message_type="m.room.message",
                 content=content,
             )
-
-    async def _replay_missed_messages(self, sync_response: Any) -> None:
-        """Check initial sync for messages sent while we were offline."""
-        from datetime import datetime, timezone
-
-        from sqlalchemy import func, select
-
-        from aineko.db import get_session
-        from aineko.models.message import Message, Role, Session
-
-        if not hasattr(sync_response, "rooms") or not sync_response.rooms:
-            return
-        if not hasattr(sync_response.rooms, "join"):
-            return
-
-        rooms_to_check = self._settings.room_list or list(
-            sync_response.rooms.join.keys()
-        )
-
-        for room_id in rooms_to_check:
-            room_data = sync_response.rooms.join.get(room_id)
-            if not room_data or not hasattr(room_data, "timeline"):
-                continue
-
-            # Find the timestamp of our last assistant reply in this room
-            last_reply_ts: datetime | None = None
-            async for db in get_session():
-                result = await db.execute(
-                    select(func.max(Message.created_at))
-                    .join(Session)
-                    .where(Session.room_id == room_id)
-                    .where(Message.role == Role.ASSISTANT)
-                )
-                last_reply_ts = result.scalar_one_or_none()
-
-            # Collect user messages from timeline that are newer than our last reply
-            missed = []
-            for event in room_data.timeline.events:
-                if not isinstance(event, RoomMessageText):
-                    continue
-                if event.sender in (self._settings.user_id, self._client.user_id):
-                    continue
-                event_ts = datetime.fromtimestamp(
-                    event.server_timestamp / 1000, tz=timezone.utc
-                )
-                # Skip if we already replied after this message
-                if last_reply_ts and event_ts <= last_reply_ts.replace(
-                    tzinfo=timezone.utc
-                ):
-                    continue
-                missed.append((event, event_ts))
-
-            if not missed:
-                continue
-
-            logger.info(
-                "Matrix: found %d missed message(s) in %s", len(missed), room_id
-            )
-            for event, event_ts in missed:
-                if self._queue is None:
-                    break
-                msg = IncomingMessage(
-                    room_id=room_id,
-                    sender=event.sender,
-                    body=event.body,
-                    timestamp=event_ts,
-                    event_id=event.event_id,
-                )
-                logger.info(
-                    "replaying missed message",
-                    extra={
-                        "event": "msg_replay",
-                        "sender": msg.sender,
-                        "room": room_id,
-                        "body": msg.body[:100],
-                    },
-                )
-                await self._queue.enqueue(msg)
 
     async def _setup_crypto(self) -> None:
         """Set up crypto in background: trust devices, query keys, claim OTKs."""

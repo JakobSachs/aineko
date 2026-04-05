@@ -5,7 +5,6 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
 from fastapi import FastAPI
 
@@ -42,7 +41,9 @@ from aineko.tools.glob import glob_tool
 from aineko.tools.grep import grep_tool
 from aineko.tools.registry import ToolRegistry
 from aineko.tools.memory import memory_recall_tool
+from aineko.tools import calendar as calendar_mod
 from aineko.tools import web_search as web_search_mod
+from aineko.tools.calendar import read_calendar_tool
 from aineko.tools.search_chat import search_chat_tool
 from aineko.tools.tool_history import search_tool_history_tool
 from aineko.tools.background_task import BackgroundTaskManager
@@ -64,6 +65,7 @@ def build_tools() -> ToolRegistry:
     registry.register(memory_recall_tool)
     registry.register(search_tool_history_tool)
     registry.register(search_chat_tool)
+    registry.register(read_calendar_tool)
     return registry
 
 
@@ -184,6 +186,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Tools
     tools: ToolRegistry = build_tools()
     web_search_mod.brave_api_key = settings.brave_api_key
+    calendar_mod.caldav_url = settings.caldav.url
+    calendar_mod.caldav_username = settings.caldav.username
+    calendar_mod.caldav_password = settings.caldav.password
 
     # Kimi
     kimi: KimiClient = KimiClient(settings.kimi)

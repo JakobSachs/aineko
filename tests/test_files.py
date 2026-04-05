@@ -1,8 +1,98 @@
 """Tests for file read/write/edit tools."""
 
-import pytest
+import string
 
-from aineko.tools.files import read_file, write_file, edit_file
+import pytest
+from hypothesis import assume, given, settings
+from hypothesis import strategies as st
+
+from aineko.tools.files import (
+    DATA_ROOT,
+    _resolve_path,
+    read_file,
+    write_file,
+    edit_file,
+)
+
+# --- Property-based tests ---
+
+
+class TestResolvePathProperties:
+    @given(
+        name=st.text(
+            alphabet=st.sampled_from(
+                list(string.ascii_letters + string.digits + "-_.")
+            ),
+            min_size=1,
+            max_size=50,
+        )
+    )
+    def test_simple_names_stay_inside_data(self, name: str):
+        resolved = _resolve_path(name)
+        assert str(resolved).startswith(str(DATA_ROOT))
+
+    @given(
+        depth=st.integers(min_value=1, max_value=20),
+        name=st.text(
+            alphabet=st.sampled_from(list(string.ascii_letters)),
+            min_size=1,
+            max_size=10,
+        ),
+    )
+    def test_traversal_always_blocked(self, depth: int, name: str):
+        evil_path = "../" * depth + name
+        with pytest.raises(ValueError, match="escapes data directory"):
+            _resolve_path(evil_path)
+
+
+class TestEditFileProperties:
+    @given(
+        content=st.text(
+            alphabet=st.characters(exclude_characters="\r", exclude_categories=("Cs",)),
+            min_size=10,
+            max_size=500,
+        ),
+        old_start=st.integers(min_value=0),
+        old_len=st.integers(min_value=1, max_value=20),
+        new_text=st.text(
+            alphabet=st.characters(exclude_characters="\r", exclude_categories=("Cs",)),
+            min_size=0,
+            max_size=50,
+        ),
+    )
+    @settings(max_examples=30)
+    @pytest.mark.asyncio
+    async def test_single_replace_changes_exactly_one(
+        self,
+        content: str,
+        old_start: int,
+        old_len: int,
+        new_text: str,
+    ):
+        """When old_text appears exactly once, replacement succeeds."""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        old_start = old_start % max(1, len(content))
+        old_end = min(old_start + old_len, len(content))
+        old_text = content[old_start:old_end]
+        assume(len(old_text) > 0)
+        assume(content.count(old_text) == 1)
+        assume(old_text != new_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            test_file = tmp / "test.txt"
+            test_file.write_text(content)
+
+            with patch("aineko.tools.files.DATA_ROOT", tmp):
+                result = await edit_file("test.txt", old_text, new_text)
+            assert "Error" not in result
+            assert new_text in test_file.read_text()
+
+
+# --- Example-based tests ---
 
 
 @pytest.fixture
@@ -125,6 +215,72 @@ async def test_edit_file_multiline(data_dir):
     assert (
         data_dir / "doc.md"
     ).read_text() == "start\nnew line 1\nnew line 2\nnew line 3\nend\n"
+
+
+# --- replace_all ---
+
+
+@pytest.mark.asyncio
+async def test_edit_file_replace_all(data_dir):
+    (data_dir / "doc.md").write_text("foo bar\nfoo baz\nfoo qux\n")
+    result = await edit_file("doc.md", "foo", "replaced", replace_all=True)
+    assert "Edited" in result
+    content = (data_dir / "doc.md").read_text()
+    assert content == "replaced bar\nreplaced baz\nreplaced qux\n"
+
+
+# --- output formatting ---
+
+
+@pytest.mark.asyncio
+async def test_read_file_xml_tags(data_dir):
+    (data_dir / "hello.py").write_text("code\n")
+    result = await read_file("hello.py")
+    assert "<path>hello.py</path>" in result
+    assert "<type>file</type>" in result
+    assert "<content>" in result
+
+
+@pytest.mark.asyncio
+async def test_read_file_long_line_truncated(data_dir):
+    (data_dir / "long.txt").write_text("x" * 3000 + "\n")
+    result = await read_file("long.txt")
+    assert "truncated" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_read_directory(data_dir):
+    sub = data_dir / "project"
+    sub.mkdir()
+    (sub / "file.py").write_text("code")
+    (sub / "subdir").mkdir()
+    result = await read_file("project")
+    assert "<type>directory</type>" in result
+    assert "file.py" in result
+    assert "subdir/" in result
+
+
+@pytest.mark.asyncio
+async def test_read_directory_truncated(data_dir):
+    """Directory listing with more entries than limit shows truncation message."""
+    sub = data_dir / "bigdir"
+    sub.mkdir()
+    for i in range(50):
+        (sub / f"file_{i:03d}.txt").write_text("x")
+    result = await read_file("bigdir", limit=5)
+    assert "Showing" in result
+    assert "50" in result
+
+
+@pytest.mark.asyncio
+async def test_read_file_max_read_cap(data_dir, monkeypatch):
+    """File content exceeding MAX_READ is truncated."""
+    import aineko.tools.files as mod
+
+    monkeypatch.setattr(mod, "MAX_READ", 200)
+    (data_dir / "huge.txt").write_text("x" * 500 + "\n")
+    result = await read_file("huge.txt")
+    assert "truncated" in result.lower()
 
 
 # --- path traversal ---

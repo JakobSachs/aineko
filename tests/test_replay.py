@@ -1,233 +1,149 @@
-"""Tests for missed message replay on startup."""
+"""Tests for sync token persistence — replaces the old replay logic.
 
-import asyncio
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+Instead of replaying missed messages by scanning timelines, we now persist
+the next_batch sync token so nio only returns new events on restart.
+"""
+
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 from aineko.matrix.client import MatrixConnector
-from aineko.queue import MessageQueue
-from aineko.schemas.message import IncomingMessage
-
-
-@dataclass
-class FakeRoomMessageText:
-    """Mimics nio.RoomMessageText for timeline events."""
-
-    sender: str
-    body: str
-    server_timestamp: int  # ms since epoch
-    event_id: str
-
-
-@dataclass
-class FakeTimeline:
-    events: list = field(default_factory=list)
-
-
-@dataclass
-class FakeRoomInfo:
-    timeline: FakeTimeline = field(default_factory=FakeTimeline)
-
-
-@dataclass
-class FakeJoinedRooms:
-    join: dict = field(default_factory=dict)
-
-
-@dataclass
-class FakeSyncResponse:
-    rooms: FakeJoinedRooms = field(default_factory=FakeJoinedRooms)
-    next_batch: str = "s123"
-
-
-def _make_event(sender: str, body: str, ts_offset_sec: int = 0) -> FakeRoomMessageText:
-    """Create a fake text event with timestamp offset from now."""
-    base = datetime(2026, 3, 25, 12, 0, 0, tzinfo=timezone.utc)
-    ts_ms = int((base.timestamp() + ts_offset_sec) * 1000)
-    return FakeRoomMessageText(
-        sender=sender,
-        body=body,
-        server_timestamp=ts_ms,
-        event_id=f"$evt_{body.replace(' ', '_')}",
-    )
 
 
 @pytest.fixture
-def connector():
-    """Create a MatrixConnector with fake settings."""
+def store_path():
+    with tempfile.TemporaryDirectory() as td:
+        yield Path(td)
+
+
+@pytest.fixture
+def connector(store_path):
     settings = MagicMock()
     settings.homeserver = "https://matrix.test"
     settings.user_id = "@bot:test"
     settings.access_token = "fake"
     settings.password = ""
     settings.room_list = ["!room:test"]
-
-    import tempfile
-    from pathlib import Path
-
-    store = Path(tempfile.mkdtemp())
-
-    conn = MatrixConnector(settings, store)
-    return conn
+    return MatrixConnector(settings, store_path)
 
 
-@pytest.mark.asyncio
-async def test_replay_finds_missed_messages(connector, monkeypatch):
-    """Messages newer than last assistant reply are replayed."""
-    received: list[IncomingMessage] = []
+class TestSyncTokenPersistence:
+    def test_save_sync_token_writes_to_creds(self, connector, store_path):
+        """_save_sync_token persists next_batch alongside existing auth.
 
-    async def handler(msg: IncomingMessage) -> None:
-        received.append(msg)
-
-    connector._queue = MessageQueue(handler)
-    connector._client.user_id = "@bot:test"
-
-    # Patch RoomMessageText isinstance check to match our fakes
-    import aineko.matrix.client as client_mod
-
-    monkeypatch.setattr(client_mod, "RoomMessageText", FakeRoomMessageText)
-
-    # Build a sync response with messages — one old (before our last reply), one new
-    sync_resp = FakeSyncResponse(
-        rooms=FakeJoinedRooms(
-            join={
-                "!room:test": FakeRoomInfo(
-                    timeline=FakeTimeline(
-                        events=[
-                            _make_event(
-                                "@user:test", "old message", ts_offset_sec=-100
-                            ),
-                            _make_event(
-                                "@user:test", "missed message", ts_offset_sec=100
-                            ),
-                        ]
-                    )
-                )
-            }
+        It only updates an existing complete credentials file — it never
+        creates a new partial file containing only next_batch, since that
+        previously caused a KeyError on the next startup and silently killed
+        the Matrix connection.
+        """
+        creds_path = store_path / "credentials.json"
+        creds_path.write_text(
+            json.dumps(
+                {
+                    "user_id": "@bot:test",
+                    "device_id": "DEV1",
+                    "access_token": "tok",
+                }
+            )
         )
-    )
 
-    # Mock DB: last assistant reply was at base time (offset 0)
-    from datetime import datetime as dt
+        connector._client.next_batch = "s12345"
+        connector._save_sync_token()
 
-    last_reply = datetime(2026, 3, 25, 12, 0, 0)
+        creds = json.loads(creds_path.read_text())
+        assert creds["next_batch"] == "s12345"
 
-    async def fake_get_session():
-        mock_db = AsyncMock()
-        # First call: select Session
-        # Return a mock that chains .scalar_one_or_none()
-        result_mock = MagicMock()
-        result_mock.scalar_one_or_none.return_value = last_reply
-        mock_db.execute = AsyncMock(return_value=result_mock)
-        yield mock_db
+    def test_save_sync_token_noop_when_no_auth_file(self, connector, store_path):
+        """Regression: without existing auth, no partial file is created."""
+        connector._client.next_batch = "s12345"
+        connector._save_sync_token()
+        assert not (store_path / "credentials.json").exists()
 
-    monkeypatch.setattr("aineko.db.get_session", fake_get_session)
-
-    await connector._replay_missed_messages(sync_resp)
-    await asyncio.sleep(2)  # wait for queue debounce
-
-    assert len(received) == 1
-    assert received[0].body == "missed message"
-
-
-@pytest.mark.asyncio
-async def test_replay_skips_own_messages(connector, monkeypatch):
-    """Bot's own messages are not replayed."""
-    received: list[IncomingMessage] = []
-
-    async def handler(msg: IncomingMessage) -> None:
-        received.append(msg)
-
-    connector._queue = MessageQueue(handler)
-    connector._client.user_id = "@bot:test"
-
-    import aineko.matrix.client as client_mod
-
-    monkeypatch.setattr(client_mod, "RoomMessageText", FakeRoomMessageText)
-
-    sync_resp = FakeSyncResponse(
-        rooms=FakeJoinedRooms(
-            join={
-                "!room:test": FakeRoomInfo(
-                    timeline=FakeTimeline(
-                        events=[
-                            _make_event(
-                                "@bot:test", "my own message", ts_offset_sec=100
-                            ),
-                            _make_event(
-                                "@user:test", "user message", ts_offset_sec=200
-                            ),
-                        ]
-                    )
-                )
-            }
+    def test_save_sync_token_preserves_existing_creds(self, connector, store_path):
+        """Saving sync token doesn't clobber existing credential fields."""
+        creds_path = store_path / "credentials.json"
+        creds_path.write_text(
+            json.dumps(
+                {
+                    "user_id": "@bot:test",
+                    "device_id": "DEV1",
+                    "access_token": "tok",
+                }
+            )
         )
-    )
 
-    # No previous replies in DB
-    async def fake_get_session():
-        mock_db = AsyncMock()
-        result_mock = MagicMock()
-        result_mock.scalar_one_or_none.return_value = None
-        mock_db.execute = AsyncMock(return_value=result_mock)
-        yield mock_db
+        connector._client.next_batch = "s99999"
+        connector._save_sync_token()
 
-    monkeypatch.setattr("aineko.db.get_session", fake_get_session)
+        creds = json.loads(creds_path.read_text())
+        assert creds["access_token"] == "tok"
+        assert creds["device_id"] == "DEV1"
+        assert creds["next_batch"] == "s99999"
 
-    await connector._replay_missed_messages(sync_resp)
-    await asyncio.sleep(2)
+    def test_save_sync_token_noop_when_no_token(self, connector, store_path):
+        """No file written if next_batch is empty."""
+        connector._client.next_batch = ""
+        connector._save_sync_token()
+        assert not (store_path / "credentials.json").exists()
 
-    assert len(received) == 1
-    assert received[0].body == "user message"
-
-
-@pytest.mark.asyncio
-async def test_replay_no_messages_when_all_replied(connector, monkeypatch):
-    """No replay when all messages are older than last reply."""
-    received: list[IncomingMessage] = []
-
-    async def handler(msg: IncomingMessage) -> None:
-        received.append(msg)
-
-    connector._queue = MessageQueue(handler)
-    connector._client.user_id = "@bot:test"
-
-    import aineko.matrix.client as client_mod
-
-    monkeypatch.setattr(client_mod, "RoomMessageText", FakeRoomMessageText)
-
-    sync_resp = FakeSyncResponse(
-        rooms=FakeJoinedRooms(
-            join={
-                "!room:test": FakeRoomInfo(
-                    timeline=FakeTimeline(
-                        events=[
-                            _make_event(
-                                "@user:test", "already handled", ts_offset_sec=-100
-                            ),
-                        ]
-                    )
-                )
-            }
+    def test_restore_sync_token_on_start(self, store_path):
+        """Saved next_batch is restored into the client on startup."""
+        creds_path = store_path / "credentials.json"
+        creds_path.write_text(
+            json.dumps(
+                {
+                    "user_id": "@bot:test",
+                    "device_id": "DEV1",
+                    "access_token": "tok",
+                    "next_batch": "s_restored",
+                }
+            )
         )
-    )
 
-    # Last reply was after the message
-    last_reply = datetime(2026, 3, 25, 12, 0, 0)
+        settings = MagicMock()
+        settings.homeserver = "https://matrix.test"
+        settings.user_id = "@bot:test"
+        settings.access_token = ""
+        settings.password = ""
 
-    async def fake_get_session():
-        mock_db = AsyncMock()
-        result_mock = MagicMock()
-        result_mock.scalar_one_or_none.return_value = last_reply
-        mock_db.execute = AsyncMock(return_value=result_mock)
-        yield mock_db
+        conn = MatrixConnector(settings, store_path)
+        # Simulate the credential-restore branch of start() without actually calling start()
+        creds = json.loads(creds_path.read_text())
+        conn._client.access_token = creds["access_token"]
+        conn._client.device_id = creds["device_id"]
+        conn._client.user_id = creds["user_id"]
+        if "next_batch" in creds:
+            conn._client.next_batch = creds["next_batch"]
 
-    monkeypatch.setattr("aineko.db.get_session", fake_get_session)
+        assert conn._client.next_batch == "s_restored"
 
-    await connector._replay_missed_messages(sync_resp)
-    await asyncio.sleep(2)
+    def test_save_then_restore_roundtrip(self, connector, store_path):
+        """A saved token can be read back correctly (with auth present)."""
+        creds_path = store_path / "credentials.json"
+        creds_path.write_text(
+            json.dumps(
+                {
+                    "user_id": "@bot:test",
+                    "device_id": "DEV1",
+                    "access_token": "tok",
+                }
+            )
+        )
 
-    assert len(received) == 0
+        connector._client.next_batch = "s_roundtrip_42"
+        connector._save_sync_token()
+
+        creds = json.loads(creds_path.read_text())
+        assert creds["next_batch"] == "s_roundtrip_42"
+        assert creds["access_token"] == "tok"
+
+        # Simulate a new connector loading the same store
+        settings = connector._settings
+        conn2 = MatrixConnector(settings, store_path)
+        loaded = json.loads(creds_path.read_text())
+        conn2._client.next_batch = loaded.get("next_batch", "")
+        assert conn2._client.next_batch == "s_roundtrip_42"

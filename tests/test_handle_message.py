@@ -1,7 +1,6 @@
 """Integration test for handle_message — catches wiring bugs between app.py and its dependencies."""
 
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -72,13 +71,20 @@ def memory_dir(tmp_path):
 
 class TestHandleMessageIntegration:
     @pytest.mark.asyncio
-    async def test_basic_message_flow(self, setup_db, msg, kimi, matrix, skills, soul_path, memory_dir):
+    async def test_basic_message_flow(
+        self, setup_db, msg, kimi, matrix, skills, soul_path, memory_dir
+    ):
         """handle_message runs end-to-end without errors."""
         tools = ToolRegistry()
 
         await handle_message(
-            msg, kimi, tools, skills, matrix,
-            soul_path, memory_dir,
+            msg,
+            kimi,
+            tools,
+            skills,
+            matrix,
+            soul_path,
+            memory_dir,
             max_context_tokens=100_000,
         )
 
@@ -86,7 +92,9 @@ class TestHandleMessageIntegration:
         matrix.send_message.assert_awaited_once_with("!room:test", "hi there")
 
     @pytest.mark.asyncio
-    async def test_reset_command(self, setup_db, kimi, matrix, skills, soul_path, memory_dir):
+    async def test_reset_command(
+        self, setup_db, kimi, matrix, skills, soul_path, memory_dir
+    ):
         """The /reset command clears conversation and replies."""
         tools = ToolRegistry()
         reset_msg = IncomingMessage(
@@ -98,8 +106,13 @@ class TestHandleMessageIntegration:
         )
 
         await handle_message(
-            reset_msg, kimi, tools, skills, matrix,
-            soul_path, memory_dir,
+            reset_msg,
+            kimi,
+            tools,
+            skills,
+            matrix,
+            soul_path,
+            memory_dir,
             max_context_tokens=100_000,
         )
 
@@ -108,13 +121,20 @@ class TestHandleMessageIntegration:
         assert "cleared" in matrix.send_message.call_args[0][1]
 
     @pytest.mark.asyncio
-    async def test_response_persisted_across_calls(self, setup_db, msg, kimi, matrix, skills, soul_path, memory_dir):
+    async def test_response_persisted_across_calls(
+        self, setup_db, msg, kimi, matrix, skills, soul_path, memory_dir
+    ):
         """Second call includes history from the first."""
         tools = ToolRegistry()
 
         await handle_message(
-            msg, kimi, tools, skills, matrix,
-            soul_path, memory_dir,
+            msg,
+            kimi,
+            tools,
+            skills,
+            matrix,
+            soul_path,
+            memory_dir,
             max_context_tokens=100_000,
         )
 
@@ -127,8 +147,13 @@ class TestHandleMessageIntegration:
             timestamp=datetime.now(timezone.utc),
         )
         await handle_message(
-            msg2, kimi, tools, skills, matrix,
-            soul_path, memory_dir,
+            msg2,
+            kimi,
+            tools,
+            skills,
+            matrix,
+            soul_path,
+            memory_dir,
             max_context_tokens=100_000,
         )
 

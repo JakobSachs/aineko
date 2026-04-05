@@ -1,10 +1,9 @@
 """Tests for doom loop detection in chat_loop."""
 
-import json
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
-from aineko.kimi.client import KimiClient, ChatResponse, ToolCall, ToolCallRecord
+from aineko.kimi.client import KimiClient, ChatResponse, ToolCall
 from aineko.tools.registry import ToolRegistry, ToolDef
 
 DOOM_LOOP_THRESHOLD = 3
@@ -45,7 +44,6 @@ async def test_doom_loop_detected_after_3_identical_calls():
     """Same tool + same args 3x in a row should be rejected."""
     client = KimiClient(_make_settings())
 
-    call_count = 0
     responses = []
     # Model keeps calling bash with same args 3 times, then gives final answer
     same_call = _make_tool_response("bash", {"command": "failing_cmd"})
@@ -80,7 +78,7 @@ async def test_doom_loop_detected_after_3_identical_calls():
         )
     )
 
-    result = await client.chat_loop([{"role": "user", "content": "test"}], registry)
+    await client.chat_loop([{"role": "user", "content": "test"}], registry)
 
     # The tool should have been called fewer than DOOM_LOOP_THRESHOLD + 1 times
     # because the 3rd identical call gets rejected
@@ -125,7 +123,7 @@ async def test_different_args_dont_trigger_doom_loop():
         )
     )
 
-    result = await client.chat_loop([{"role": "user", "content": "test"}], registry)
+    await client.chat_loop([{"role": "user", "content": "test"}], registry)
     # All 3 should have executed since args differ
     assert len(tool_results) == 3
 
@@ -172,5 +170,5 @@ async def test_different_tools_dont_trigger_doom_loop():
             )
         )
 
-    result = await client.chat_loop([{"role": "user", "content": "test"}], registry)
+    await client.chat_loop([{"role": "user", "content": "test"}], registry)
     assert len(call_log) == 3

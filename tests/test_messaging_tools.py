@@ -1,5 +1,6 @@
 """Tests for messaging tool factories (send_message, send_file, background tasks)."""
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -85,7 +86,7 @@ class TestMakeSendFileTool:
             mock_send = AsyncMock(return_value="Sent")
             mp.setattr("aineko.tools.messaging.send_file_via_matrix", mock_send)
 
-            result = await tool.handler(path="a.csv", filename="b.csv", room="!other:x")
+            await tool.handler(path="a.csv", filename="b.csv", room="!other:x")
             mock_send.assert_awaited_once_with(
                 matrix, "!other:x", "a.csv", filename="b.csv"
             )
@@ -162,3 +163,76 @@ class TestMakeBackgroundTaskTools:
             call_kwargs.kwargs.get("room_id") == "!room:x"
             or call_kwargs[1].get("room_id") == "!room:x"
         )
+
+    @pytest.mark.asyncio
+    async def test_inject_result_sends_to_matrix(self):
+        """_inject_result calls matrix.inject_message with formatted body."""
+        matrix = AsyncMock()
+        bg = MagicMock()
+        tools = make_background_task_tools(bg, "!room:x", matrix)
+
+        # The inject_fn is passed to bg_tasks.spawn — extract it from the spawn call
+        spawn_tool = next(t for t in tools if t.name == "spawn_task")
+        record = MagicMock()
+        record.id = "t1"
+        record.label = "build"
+        bg.spawn.return_value = record
+        await spawn_tool.handler(command="make")
+
+        inject_fn = bg.spawn.call_args.kwargs.get("inject_fn") or bg.spawn.call_args[
+            1
+        ].get("inject_fn")
+        await inject_fn("t1", "build", "success")
+
+        matrix.inject_message.assert_awaited_once()
+        body = matrix.inject_message.call_args[0][1]
+        assert "build" in body
+        assert "t1" in body
+        assert "success" in body
+
+    @pytest.mark.asyncio
+    async def test_get_task_result_running(self):
+        """get_task_result shows elapsed time for running tasks."""
+        from aineko.tools.background_task import TaskRecord
+
+        bg = MagicMock()
+        record = TaskRecord(
+            id="r1",
+            command="sleep 60",
+            label="long task",
+            room_id="!room:x",
+            created_at=datetime.now(timezone.utc),
+            finished=False,
+        )
+        bg.get.return_value = record
+
+        tools = make_background_task_tools(bg, "!room:x", AsyncMock())
+        get_tool = next(t for t in tools if t.name == "get_task_result")
+
+        result = await get_tool.handler(task_id="r1")
+        assert "still running" in result
+        assert "long task" in result
+
+    @pytest.mark.asyncio
+    async def test_get_task_result_finished(self):
+        """get_task_result shows result for finished tasks."""
+        from aineko.tools.background_task import TaskRecord
+
+        bg = MagicMock()
+        record = TaskRecord(
+            id="f1",
+            command="echo done",
+            label="quick",
+            room_id="!room:x",
+            created_at=datetime.now(timezone.utc),
+            finished=True,
+            result="done\n[exit code: 0]",
+        )
+        bg.get.return_value = record
+
+        tools = make_background_task_tools(bg, "!room:x", AsyncMock())
+        get_tool = next(t for t in tools if t.name == "get_task_result")
+
+        result = await get_tool.handler(task_id="f1")
+        assert "finished" in result
+        assert "done" in result

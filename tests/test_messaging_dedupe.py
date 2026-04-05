@@ -5,6 +5,97 @@ and send_message tool calls don't produce duplicate messages.
 """
 
 import pytest
+from hypothesis import assume, given
+from hypothesis import strategies as st
+
+from aineko.messaging_dedupe import (
+    MIN_DUPLICATE_LENGTH,
+    MessageDeduplicator,
+    is_duplicate,
+    normalize_text,
+)
+
+# Strategy: strings that might trip up parsers (unicode, control chars, emoji, etc.)
+_nasty_text = st.text(
+    alphabet=st.characters(categories=("L", "M", "N", "P", "S", "Z", "C")),
+    min_size=0,
+    max_size=500,
+)
+
+
+# --- Property-based tests ---
+
+
+class TestNormalizeTextProperties:
+    @given(text=_nasty_text)
+    def test_never_crashes(self, text: str):
+        normalize_text(text)
+
+    @given(text=_nasty_text)
+    def test_result_is_lowercase(self, text: str):
+        assert normalize_text(text) == normalize_text(text).lower()
+
+    @given(text=_nasty_text)
+    def test_no_leading_trailing_whitespace(self, text: str):
+        result = normalize_text(text)
+        assert result == result.strip()
+
+    @given(text=_nasty_text)
+    def test_no_double_spaces(self, text: str):
+        assert "  " not in normalize_text(text)
+
+    @given(text=st.text(min_size=1, max_size=200))
+    def test_idempotent(self, text: str):
+        once = normalize_text(text)
+        assert normalize_text(once) == once
+
+
+class TestIsDuplicateProperties:
+    @given(text=st.text(min_size=MIN_DUPLICATE_LENGTH, max_size=200))
+    def test_reflexive(self, text: str):
+        """A sufficiently long text is always a duplicate of itself."""
+        assume(len(normalize_text(text)) >= MIN_DUPLICATE_LENGTH)
+        assert is_duplicate(text, [text]) is True
+
+    @given(text=st.text(min_size=0, max_size=MIN_DUPLICATE_LENGTH - 1))
+    def test_short_text_never_duplicate(self, text: str):
+        assert is_duplicate(text, [text]) is False
+
+    @given(text=_nasty_text)
+    def test_empty_sent_list_never_duplicate(self, text: str):
+        assert is_duplicate(text, []) is False
+
+    @given(
+        a=st.text(min_size=MIN_DUPLICATE_LENGTH, max_size=100),
+        b=st.text(min_size=MIN_DUPLICATE_LENGTH, max_size=100),
+    )
+    def test_symmetric(self, a: str, b: str):
+        assert is_duplicate(a, [b]) == is_duplicate(b, [a])
+
+
+class TestMessageDeduplicatorProperties:
+    @given(text=st.text(min_size=MIN_DUPLICATE_LENGTH, max_size=200))
+    def test_tracked_message_detected(self, text: str):
+        assume(len(normalize_text(text)) >= MIN_DUPLICATE_LENGTH)
+        dd = MessageDeduplicator()
+        dd.track_sent(text)
+        assert dd.is_duplicate(text) is True
+
+    @given(text=st.text(min_size=MIN_DUPLICATE_LENGTH, max_size=200))
+    def test_discarded_pending_not_duplicate(self, text: str):
+        dd = MessageDeduplicator()
+        dd.track_pending("call-1", text)
+        dd.discard_pending("call-1")
+        assert dd.is_duplicate(text) is False
+
+    @given(text=st.text(min_size=MIN_DUPLICATE_LENGTH, max_size=200))
+    def test_committed_pending_is_duplicate(self, text: str):
+        assume(len(normalize_text(text)) >= MIN_DUPLICATE_LENGTH)
+        dd = MessageDeduplicator()
+        dd.track_pending("call-1", text)
+        dd.commit_pending("call-1")
+        assert dd.is_duplicate(text) is True
+
 
 # --- Unit tests: normalize_text_for_comparison ---
 
@@ -201,7 +292,7 @@ class TestChatLoopDedup:
     async def test_intermediate_skipped_when_send_message_has_same_text(self):
         """When model returns content + send_message with same text,
         only one message should be sent."""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock
         from aineko.kimi.client import KimiClient, ChatResponse, ToolCall
         from aineko.tools.registry import ToolDef, ToolRegistry
 

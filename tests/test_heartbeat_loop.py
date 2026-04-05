@@ -56,7 +56,9 @@ class TestHeartbeatTickLoop:
         heartbeat.should_run.side_effect = [True] + [False] * 100
 
         await _run_loop(
-            heartbeat_tick_loop(heartbeat, kimi, tools, matrix, "!room:x", "sys", interval=0)
+            heartbeat_tick_loop(
+                heartbeat, kimi, tools, matrix, "!room:x", "sys", interval=0
+            )
         )
 
         kimi.chat_loop.assert_awaited_once()
@@ -67,19 +69,25 @@ class TestHeartbeatTickLoop:
         heartbeat.should_run.return_value = False
 
         await _run_loop(
-            heartbeat_tick_loop(heartbeat, kimi, tools, matrix, "!room:x", "sys", interval=0)
+            heartbeat_tick_loop(
+                heartbeat, kimi, tools, matrix, "!room:x", "sys", interval=0
+            )
         )
 
         kimi.chat_loop.assert_not_awaited()
         matrix.send_message.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_suppresses_when_should_deliver_false(self, heartbeat, kimi, tools, matrix):
+    async def test_suppresses_when_should_deliver_false(
+        self, heartbeat, kimi, tools, matrix
+    ):
         heartbeat.should_run.side_effect = [True] + [False] * 100
         heartbeat.should_deliver.return_value = False
 
         await _run_loop(
-            heartbeat_tick_loop(heartbeat, kimi, tools, matrix, "!room:x", "sys", interval=0)
+            heartbeat_tick_loop(
+                heartbeat, kimi, tools, matrix, "!room:x", "sys", interval=0
+            )
         )
 
         kimi.chat_loop.assert_awaited()
@@ -90,7 +98,9 @@ class TestHeartbeatTickLoop:
         heartbeat.should_run.side_effect = [True] + [False] * 100
 
         await _run_loop(
-            heartbeat_tick_loop(heartbeat, kimi, tools, matrix, "!room:x", "sys", interval=0)
+            heartbeat_tick_loop(
+                heartbeat, kimi, tools, matrix, "!room:x", "sys", interval=0
+            )
         )
 
         call_args = kimi.chat_loop.call_args
@@ -104,7 +114,9 @@ class TestHeartbeatTickLoop:
         kimi.chat_loop.side_effect = RuntimeError("boom")
 
         await _run_loop(
-            heartbeat_tick_loop(heartbeat, kimi, tools, matrix, "!room:x", "sys", interval=0)
+            heartbeat_tick_loop(
+                heartbeat, kimi, tools, matrix, "!room:x", "sys", interval=0
+            )
         )
 
         # Loop survived — should_run was called multiple times
@@ -128,7 +140,9 @@ class TestHeartbeatTickLoop:
         kimi.chat_loop.return_value = resp
 
         await _run_loop(
-            heartbeat_tick_loop(heartbeat, kimi, tools, matrix, "!room:x", "sys", interval=0)
+            heartbeat_tick_loop(
+                heartbeat, kimi, tools, matrix, "!room:x", "sys", interval=0
+            )
         )
 
         matrix.send_message.assert_not_awaited()

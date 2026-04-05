@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from aineko.matrix.client import send_file as send_file_via_matrix
 from aineko.tools.registry import ToolDef

@@ -3,7 +3,6 @@
 Covers: tool result format, malformed args handling, doom loop, tool registration.
 """
 
-import json
 import pytest
 from unittest.mock import MagicMock
 

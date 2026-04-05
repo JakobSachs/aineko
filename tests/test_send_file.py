@@ -1,6 +1,6 @@
 """Tests for Matrix file sending."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 from dataclasses import dataclass
 
 import pytest

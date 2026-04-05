@@ -26,9 +26,7 @@ class CronScheduler:
 
     async def load_jobs(self, session: AsyncSession) -> None:
         """Load all enabled jobs from DB and schedule them."""
-        result = await session.execute(
-            select(CronJob).where(CronJob.enabled == True)
-        )  # noqa: E712
+        result = await session.execute(select(CronJob).where(CronJob.enabled.is_(True)))
         jobs = result.scalars().all()
 
         for job in jobs:

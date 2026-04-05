@@ -1,8 +1,70 @@
 """Tests for tool output truncation layer."""
 
-import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from aineko.tools.truncate import truncate_output, MAX_LINES, MAX_BYTES
+
+_nasty_text = st.text(
+    alphabet=st.characters(categories=("L", "M", "N", "P", "S", "Z", "C")),
+    min_size=0,
+    max_size=500,
+)
+
+
+# --- Property-based tests ---
+
+
+class TestTruncateOutputProperties:
+    @given(text=_nasty_text)
+    @settings(max_examples=50)
+    def test_never_crashes(self, text: str):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with patch("aineko.tools.truncate.TRUNCATION_DIR", Path(tempfile.mkdtemp())):
+            truncate_output(text)
+
+    @given(text=st.text(min_size=0, max_size=100))
+    def test_short_text_not_truncated(self, text: str):
+        result, meta = truncate_output(text)
+        if text:
+            assert meta["truncated"] is False
+            assert result == text
+
+    @given(text=_nasty_text)
+    @settings(max_examples=30)
+    def test_metadata_always_has_truncated_key(self, text: str):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with patch("aineko.tools.truncate.TRUNCATION_DIR", Path(tempfile.mkdtemp())):
+            _, meta = truncate_output(text)
+            assert "truncated" in meta
+
+    @given(
+        line=st.text(
+            alphabet=st.characters(categories=("L", "N")), min_size=1, max_size=20
+        ),
+        count=st.integers(min_value=MAX_LINES + 1, max_value=MAX_LINES + 50),
+    )
+    @settings(max_examples=10)
+    def test_line_count_respected(self, line: str, count: int):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with patch("aineko.tools.truncate.TRUNCATION_DIR", Path(tempfile.mkdtemp())):
+            text = (line + "\n") * count
+            result, meta = truncate_output(text)
+            assert meta["truncated"] is True
+            preview = result.split("\n\n... ")[0]
+            assert preview.count("\n") <= MAX_LINES
+
+
+# --- Example-based tests ---
 
 
 def test_short_output_unchanged():

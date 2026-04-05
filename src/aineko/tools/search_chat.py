@@ -5,7 +5,7 @@ import logging
 from sqlalchemy import select
 
 from aineko.db import get_session
-from aineko.models.message import Message, Role, Session
+from aineko.models.message import Message, Role
 from aineko.tools.registry import ToolDef
 
 logger = logging.getLogger(__name__)

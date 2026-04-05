@@ -7,13 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from aineko.db import Base
 from aineko.models.message import Message, Role, Session, ToolLog
 from aineko.schemas.message import IncomingMessage
 from aineko.tools.registry import ToolDef, ToolRegistry
-
 
 # --- DB fixture (real in-memory SQLite) ---
 
@@ -62,7 +61,10 @@ class TestHandleCommand:
         await db.commit()
 
         msg = IncomingMessage(
-            room_id="!room:test", sender="@u:t", body="/reset", event_id="$e",
+            room_id="!room:test",
+            sender="@u:t",
+            body="/reset",
+            event_id="$e",
             timestamp=datetime.now(timezone.utc),
         )
         handled = await handle_command(db, msg, matrix)
@@ -79,7 +81,10 @@ class TestHandleCommand:
         from aineko.handler import handle_command
 
         msg = IncomingMessage(
-            room_id="!room:test", sender="@u:t", body="/clear", event_id="$e",
+            room_id="!room:test",
+            sender="@u:t",
+            body="/clear",
+            event_id="$e",
             timestamp=datetime.now(timezone.utc),
         )
         handled = await handle_command(db, msg, matrix)
@@ -90,7 +95,10 @@ class TestHandleCommand:
         from aineko.handler import handle_command
 
         msg = IncomingMessage(
-            room_id="!room:test", sender="@u:t", body="hello", event_id="$e",
+            room_id="!room:test",
+            sender="@u:t",
+            body="hello",
+            event_id="$e",
             timestamp=datetime.now(timezone.utc),
         )
         handled = await handle_command(db, msg, matrix)
@@ -107,9 +115,7 @@ class TestBuildRequestTools:
 
         base = ToolRegistry()
         base.register(
-            ToolDef(
-                name="bash", description="run", parameters={}, handler=AsyncMock()
-            )
+            ToolDef(name="bash", description="run", parameters={}, handler=AsyncMock())
         )
         result = build_request_tools(base, AsyncMock(), "!room:x", [])
         assert result.get("bash") is not None
@@ -171,9 +177,7 @@ class TestLoadConversation:
         db.add(existing)
         await db.flush()
 
-        session, _, _ = await load_conversation(
-            db, msg, system_prompt="sys"
-        )
+        session, _, _ = await load_conversation(db, msg, system_prompt="sys")
         assert session.id == existing.id
 
     @pytest.mark.asyncio
@@ -199,20 +203,27 @@ class TestLoadConversation:
         s = Session(room_id="!room:test")
         db.add(s)
         await db.flush()
-        blocks = [{"type": "text", "text": "thinking"}, {"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]
-        db.add(Message(
-            session_id=s.id,
-            role=Role.ASSISTANT,
-            content=json.dumps(blocks),
-            tool_name="__has_tool_calls__",
-        ))
+        blocks = [
+            {"type": "text", "text": "thinking"},
+            {"type": "tool_use", "id": "t1", "name": "bash", "input": {}},
+        ]
+        db.add(
+            Message(
+                session_id=s.id,
+                role=Role.ASSISTANT,
+                content=json.dumps(blocks),
+                tool_name="__has_tool_calls__",
+            )
+        )
         result_blocks = [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]
-        db.add(Message(
-            session_id=s.id,
-            role=Role.TOOL,
-            content=json.dumps(result_blocks),
-            tool_name="__tool_results__",
-        ))
+        db.add(
+            Message(
+                session_id=s.id,
+                role=Role.TOOL,
+                content=json.dumps(result_blocks),
+                tool_name="__tool_results__",
+            )
+        )
         await db.flush()
 
         _, _, messages = await load_conversation(db, msg, system_prompt="sys")
@@ -297,9 +308,7 @@ class TestPersistResponse:
         await persist_response(db, s, user_msg, response, sent_messages=[])
 
         # Check tool log
-        result = await db.execute(
-            select(ToolLog).where(ToolLog.session_id == s.id)
-        )
+        result = await db.execute(select(ToolLog).where(ToolLog.session_id == s.id))
         log = result.scalar_one()
         assert log.tool_name == "bash"
         assert log.arguments == '{"command": "ls"}'
