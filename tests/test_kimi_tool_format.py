@@ -259,7 +259,7 @@ def test_all_expected_tools_registered():
         "grep",
         "web_search",
         "create_skill",
-        "memory_recall",
+        "memory",
         "search_tool_history",
         "search_chat",
     ]

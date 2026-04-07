@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from aineko.compaction import compact_messages, should_compact
+from aineko.compaction import compact_messages, ingest_before_compaction, should_compact
 from aineko.config import Settings
 from aineko.context import trim_messages
 from aineko.cron.scheduler import CronScheduler
@@ -21,6 +21,7 @@ from aineko.db import (
 import aineko.db as _db
 from aineko.handler import (
     build_request_tools,
+    format_tool_footer,
     handle_command,
     load_conversation,
     persist_response,
@@ -40,7 +41,7 @@ from aineko.tools.files import edit_file_tool, read_file_tool, write_file_tool
 from aineko.tools.glob import glob_tool
 from aineko.tools.grep import grep_tool
 from aineko.tools.registry import ToolRegistry
-from aineko.tools.memory import memory_recall_tool
+from aineko.tools.memory import memory_tool
 from aineko.tools import calendar as calendar_mod
 from aineko.tools import web_search as web_search_mod
 from aineko.tools.calendar import read_calendar_tool
@@ -62,7 +63,7 @@ def build_tools() -> ToolRegistry:
     registry.register(grep_tool)
     registry.register(web_search_tool)
     registry.register(create_skill_tool)
-    registry.register(memory_recall_tool)
+    registry.register(memory_tool)
     registry.register(search_tool_history_tool)
     registry.register(search_chat_tool)
     registry.register(read_calendar_tool)
@@ -141,6 +142,11 @@ async def handle_message(
             )
             history: list[Message] = list(result.scalars().all())
 
+            # Ingest messages about to be compacted into long-term memory
+            ingest_before_compaction(
+                messages, session.id, session.room_id, compaction_keep_recent
+            )
+
             messages, summary_text = await compact_messages(
                 messages,
                 kimi,
@@ -165,7 +171,8 @@ async def handle_message(
         response: ChatResponse = await kimi.chat_loop(messages, request_tools)
 
         if response.content:
-            await matrix.send_message(msg.room_id, response.content)
+            footer: str = format_tool_footer(response.tool_history)
+            await matrix.send_message(msg.room_id, response.content + footer)
 
         await persist_response(db, session, user_msg, response, sent_messages)
 

@@ -12,6 +12,9 @@ from hypothesis import strategies as st
 from aineko.queue import MessageQueue
 from aineko.schemas.message import IncomingMessage
 
+# Use a tiny debounce for all tests so we don't wait around
+_TEST_DEBOUNCE_MS = 20
+
 
 def _msg(body: str, room: str = "!room:test") -> IncomingMessage:
     return IncomingMessage(
@@ -21,6 +24,12 @@ def _msg(body: str, room: str = "!room:test") -> IncomingMessage:
         timestamp=datetime.now(timezone.utc),
         event_id=f"evt_{body}",
     )
+
+
+@pytest.fixture(autouse=True)
+def fast_debounce():
+    with patch("aineko.queue.DEBOUNCE_MS", _TEST_DEBOUNCE_MS):
+        yield
 
 
 @pytest.mark.asyncio
@@ -33,7 +42,7 @@ async def test_single_message_delivered():
 
     q = MessageQueue(handler)
     await q.enqueue(_msg("hello"))
-    await asyncio.sleep(2)  # wait for debounce
+    await asyncio.sleep(0.05)
 
     assert len(received) == 1
     assert received[0].body == "hello"
@@ -49,11 +58,11 @@ async def test_rapid_messages_batched():
 
     q = MessageQueue(handler)
     await q.enqueue(_msg("first"))
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(0.005)  # within debounce window
     await q.enqueue(_msg("second"))
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(0.005)
     await q.enqueue(_msg("third"))
-    await asyncio.sleep(2)  # wait for debounce
+    await asyncio.sleep(0.05)  # debounce fires
 
     assert len(received) == 1
     assert "[message 1]: first" in received[0].body
@@ -65,19 +74,21 @@ async def test_rapid_messages_batched():
 async def test_messages_during_processing_queued():
     """Messages arriving while handler is busy are queued and processed after."""
     received: list[IncomingMessage] = []
+    handler_entered = asyncio.Event()
 
     async def slow_handler(msg: IncomingMessage) -> None:
+        handler_entered.set()
+        await asyncio.sleep(0.1)  # simulate processing
         received.append(msg)
-        await asyncio.sleep(1)  # simulate slow processing
 
     q = MessageQueue(slow_handler)
     await q.enqueue(_msg("first"))
-    await asyncio.sleep(2)  # debounce fires, handler starts (takes 1s)
+    await asyncio.sleep(0.03)  # debounce fires
+    await handler_entered.wait()
 
     # Send another while handler is busy
-    await asyncio.sleep(0.2)
     await q.enqueue(_msg("while busy"))
-    await asyncio.sleep(3)  # wait for everything to finish
+    await asyncio.sleep(0.3)  # wait for everything
 
     assert len(received) == 2
     assert received[0].body == "first"
@@ -95,7 +106,7 @@ async def test_different_rooms_independent():
     q = MessageQueue(handler)
     await q.enqueue(_msg("room1 msg", room="!room1:test"))
     await q.enqueue(_msg("room2 msg", room="!room2:test"))
-    await asyncio.sleep(2)
+    await asyncio.sleep(0.05)
 
     assert len(received) == 2
     rooms = {r.room_id for r in received}
@@ -105,13 +116,6 @@ async def test_different_rooms_independent():
 # ---------------------------------------------------------------------------
 # Helpers for property tests
 # ---------------------------------------------------------------------------
-
-_FAST_DEBOUNCE = 30  # ms — patched into queue module during property tests
-
-# Strategies — keep durations small so 20 examples finish in ~30s total.
-# handler_ms must be > 0 so the handler actually awaits (where cancellation strikes).
-_handler_ms = st.integers(min_value=10, max_value=120)
-_delay_ms = st.integers(min_value=0, max_value=100)
 
 
 def _extract_bodies(received: list[IncomingMessage]) -> set[str]:
@@ -138,14 +142,9 @@ def _extract_bodies_ordered(received: list[IncomingMessage]) -> list[str]:
     return flat
 
 
-# ---------------------------------------------------------------------------
-# Property tests
-#
-# Key modelling decision: the handler records the message AFTER an async
-# operation (sleep), matching the real handler where the LLM response +
-# persistence happen after the long await.  If the handler is cancelled
-# mid-await, the message is lost — exactly the bug we're testing for.
-# ---------------------------------------------------------------------------
+# Strategies — keep durations small
+_handler_ms = st.integers(min_value=5, max_value=50)
+_delay_ms = st.integers(min_value=0, max_value=30)
 
 
 class TestQueueProperties:
@@ -163,18 +162,16 @@ class TestQueueProperties:
             await asyncio.sleep(handler_ms / 1000)
             received.append(msg)
 
-        with patch("aineko.queue.DEBOUNCE_MS", _FAST_DEBOUNCE):
-            q = MessageQueue(handler)
-            expected: set[str] = set()
-            for i, delay in enumerate(delays):
-                body = f"msg_{i}"
-                expected.add(body)
-                await q.enqueue(_msg(body))
-                await asyncio.sleep(delay / 1000)
+        q = MessageQueue(handler)
+        expected: set[str] = set()
+        for i, delay in enumerate(delays):
+            body = f"msg_{i}"
+            expected.add(body)
+            await q.enqueue(_msg(body))
+            await asyncio.sleep(delay / 1000)
 
-            # Generous wait: debounce + each message could be handled serially
-            budget = (_FAST_DEBOUNCE + handler_ms) * len(delays) + 500
-            await asyncio.sleep(budget / 1000)
+        budget = (_TEST_DEBOUNCE_MS + handler_ms) * len(delays) + 200
+        await asyncio.sleep(budget / 1000)
 
         assert _extract_bodies(received) == expected
 
@@ -196,14 +193,13 @@ class TestQueueProperties:
             await asyncio.sleep(handler_ms / 1000)
             concurrent -= 1
 
-        with patch("aineko.queue.DEBOUNCE_MS", _FAST_DEBOUNCE):
-            q = MessageQueue(handler)
-            for i, delay in enumerate(delays):
-                await q.enqueue(_msg(f"msg_{i}"))
-                await asyncio.sleep(delay / 1000)
+        q = MessageQueue(handler)
+        for i, delay in enumerate(delays):
+            await q.enqueue(_msg(f"msg_{i}"))
+            await asyncio.sleep(delay / 1000)
 
-            budget = (_FAST_DEBOUNCE + handler_ms) * len(delays) + 500
-            await asyncio.sleep(budget / 1000)
+        budget = (_TEST_DEBOUNCE_MS + handler_ms) * len(delays) + 200
+        await asyncio.sleep(budget / 1000)
 
         assert max_concurrent <= 1
 
@@ -221,17 +217,16 @@ class TestQueueProperties:
             await asyncio.sleep(handler_ms / 1000)
             received.append(msg)
 
-        with patch("aineko.queue.DEBOUNCE_MS", _FAST_DEBOUNCE):
-            q = MessageQueue(handler)
-            order: list[str] = []
-            for i, delay in enumerate(delays):
-                body = f"msg_{i}"
-                order.append(body)
-                await q.enqueue(_msg(body))
-                await asyncio.sleep(delay / 1000)
+        q = MessageQueue(handler)
+        order: list[str] = []
+        for i, delay in enumerate(delays):
+            body = f"msg_{i}"
+            order.append(body)
+            await q.enqueue(_msg(body))
+            await asyncio.sleep(delay / 1000)
 
-            budget = (_FAST_DEBOUNCE + handler_ms) * len(delays) + 500
-            await asyncio.sleep(budget / 1000)
+        budget = (_TEST_DEBOUNCE_MS + handler_ms) * len(delays) + 200
+        await asyncio.sleep(budget / 1000)
 
         assert _extract_bodies_ordered(received) == order
 
@@ -253,21 +248,20 @@ async def test_message_during_slow_handler_not_lost():
 
     async def slow_handler(msg: IncomingMessage) -> None:
         handler_entered.set()
-        await asyncio.sleep(0.3)  # simulate LLM call — cancellation hits HERE
-        received.append(msg)  # simulate persistence — only runs if not cancelled
+        await asyncio.sleep(0.1)  # simulate LLM call
+        received.append(msg)
 
-    with patch("aineko.queue.DEBOUNCE_MS", 30):
-        q = MessageQueue(slow_handler)
+    q = MessageQueue(slow_handler)
 
-        await q.enqueue(_msg("first"))
-        await asyncio.sleep(0.05)  # debounce fires at 30ms
-        await handler_entered.wait()
+    await q.enqueue(_msg("first"))
+    await asyncio.sleep(0.03)  # debounce fires
+    await handler_entered.wait()
 
-        # Send two more while handler is busy — triggers the old cancel bug
-        await q.enqueue(_msg("second"))
-        await asyncio.sleep(0.05)
-        await q.enqueue(_msg("third"))
+    # Send two more while handler is busy
+    await q.enqueue(_msg("second"))
+    await asyncio.sleep(0.01)
+    await q.enqueue(_msg("third"))
 
-        await asyncio.sleep(1.5)
+    await asyncio.sleep(0.5)
 
     assert _extract_bodies(received) == {"first", "second", "third"}

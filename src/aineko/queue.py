@@ -14,7 +14,7 @@ from aineko.schemas.message import IncomingMessage
 
 logger = logging.getLogger(__name__)
 
-DEBOUNCE_MS = 1500  # wait this long after last message before processing
+DEBOUNCE_MS = 400  # wait this long after last message before processing
 MAX_QUEUE = 20  # max queued messages per room
 
 MessageHandler = Callable[[IncomingMessage], Coroutine[Any, Any, None]]

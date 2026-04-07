@@ -4,7 +4,11 @@ When conversations grow too long, summarize older messages into a structured
 summary and keep only recent messages. Inspired by OpenClaw's approach.
 """
 
+from __future__ import annotations
+
+import json
 import logging
+import re
 from typing import Any
 
 from aineko.context import estimate_tokens
@@ -34,6 +38,83 @@ COMPACTION_TEMPLATE = """\
 ## Relevant files / directories
 [List of relevant files that have been read, edited, or created]
 """
+
+
+def _clean_content(raw: str) -> str:
+    """Extract human-readable text from a message, stripping tool-call JSON."""
+    if not raw:
+        return ""
+    try:
+        blocks = json.loads(raw)
+        if isinstance(blocks, list):
+            parts = []
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block["text"].strip())
+            return "\n".join(p for p in parts if p)
+    except (json.JSONDecodeError, TypeError, KeyError):
+        pass
+    cleaned = re.sub(r"<\|tool_call[^>]*\|>", "", raw)
+    return cleaned.strip()
+
+
+def ingest_before_compaction(
+    messages: list[dict[str, Any]],
+    session_id: int,
+    room_id: str,
+    keep_recent: int = 4,
+) -> None:
+    """Store messages about to be compacted into ChromaDB long-term memory.
+
+    Called right before compact_messages(). Only ingests the old messages
+    that will be replaced by the summary. The MemoryStore's built-in dedup
+    (0.95 cosine threshold) prevents storing content that's already in memory.
+    """
+    from aineko.memory.store import MemoryStore
+
+    conversation = (
+        messages[1:] if messages and messages[0].get("role") == "system" else messages
+    )
+    if len(conversation) <= keep_recent:
+        return
+
+    old_messages = conversation[:-keep_recent]
+
+    # Build exchange pairs from old messages
+    exchanges: list[str] = []
+    pending_user: str | None = None
+    for m in old_messages:
+        role = m.get("role", "")
+        content = m.get("content", "") or ""
+        if isinstance(content, list):
+            content = " ".join(
+                p.get("text", "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        if role == "user":
+            pending_user = content
+        elif role == "assistant" and pending_user is not None:
+            text = _clean_content(content)
+            if text:
+                exchanges.append(f"> {pending_user}\n{text}")
+            pending_user = None
+
+    if not exchanges:
+        return
+
+    try:
+        store = MemoryStore(persist_dir="/data/memory/chromadb")
+        text = "\n\n---\n\n".join(exchanges)
+        tags = {"type": "conversation", "session": str(session_id), "room": room_id}
+        ids = store.add(text, source=f"conversation:{session_id}", tags=tags)
+        if ids:
+            logger.info(
+                "ingested messages into long-term memory before compaction",
+                extra={"chunks_stored": len(ids), "session_id": session_id},
+            )
+    except Exception:
+        logger.exception("failed to ingest messages before compaction")
 
 
 def should_compact(messages: list[dict[str, Any]], max_tokens: int) -> bool:

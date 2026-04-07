@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from aineko.handler import format_tool_footer
 from aineko.tools.messaging import make_send_message_tool
 from aineko.tools.registry import ToolRegistry
 
@@ -55,6 +56,7 @@ async def heartbeat_tick_loop(
 
             if response.content and heartbeat.should_deliver(response.content):
                 if heartbeat_room:
-                    await matrix.send_message(heartbeat_room, response.content)
+                    footer = format_tool_footer(response.tool_history)
+                    await matrix.send_message(heartbeat_room, response.content + footer)
         except Exception:
             logger.exception("Heartbeat tick failed")

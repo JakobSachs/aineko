@@ -150,6 +150,132 @@ class TestBuildRequestTools:
         assert result.get("spawn_task") is None
 
 
+# --- format_tool_footer ---
+
+
+class TestFormatToolFooter:
+    def _rec(self, name, arguments="{}", result="ok"):
+        from aineko.kimi.client import ToolCallRecord
+
+        return ToolCallRecord(tool_name=name, arguments=arguments, result=result)
+
+    def test_empty_history_returns_empty(self):
+        from aineko.handler import format_tool_footer
+
+        assert format_tool_footer([]) == ""
+
+    def test_only_visible_tools_returns_empty(self):
+        from aineko.handler import format_tool_footer
+
+        history = [self._rec("send_message"), self._rec("send_file")]
+        assert format_tool_footer(history) == ""
+
+    def test_single_tool_uses_singular(self):
+        from aineko.handler import format_tool_footer
+
+        assert format_tool_footer([self._rec("bash")]) == "\n\n*— 1 tool*"
+
+    def test_multiple_tools_uses_plural(self):
+        from aineko.handler import format_tool_footer
+
+        history = [self._rec("bash"), self._rec("read_file"), self._rec("grep")]
+        assert format_tool_footer(history) == "\n\n*— 3 tools*"
+
+    def test_excludes_visible_tools_from_count(self):
+        from aineko.handler import format_tool_footer
+
+        history = [
+            self._rec("bash"),
+            self._rec("send_message"),
+            self._rec("send_message"),
+            self._rec("web_search"),
+        ]
+        assert format_tool_footer(history) == "\n\n*— 2 tools*"
+
+    def test_memory_search_excluded_from_tool_count(self):
+        from aineko.handler import format_tool_footer
+
+        history = [
+            self._rec("bash"),
+            self._rec("memory", json.dumps({"action": "search", "query": "test"})),
+        ]
+        assert format_tool_footer(history) == "\n\n*— 1 tool*"
+
+    def test_memory_store_shows_memory_count(self):
+        from aineko.handler import format_tool_footer
+
+        history = [
+            self._rec("memory", json.dumps({"action": "store", "content": "note"})),
+        ]
+        assert format_tool_footer(history) == "\n\n*— 1 memory*"
+
+    def test_memory_facts_add_shows_memory_count(self):
+        from aineko.handler import format_tool_footer
+
+        history = [
+            self._rec(
+                "memory",
+                json.dumps(
+                    {
+                        "action": "facts_add",
+                        "subject": "X",
+                        "predicate": "is",
+                        "object": "Y",
+                    }
+                ),
+            ),
+        ]
+        assert format_tool_footer(history) == "\n\n*— 1 memory*"
+
+    def test_memory_writes_plural(self):
+        from aineko.handler import format_tool_footer
+
+        history = [
+            self._rec("memory", json.dumps({"action": "store", "content": "a"})),
+            self._rec(
+                "memory",
+                json.dumps(
+                    {
+                        "action": "facts_add",
+                        "subject": "X",
+                        "predicate": "is",
+                        "object": "Y",
+                    }
+                ),
+            ),
+        ]
+        assert format_tool_footer(history) == "\n\n*— 2 memories*"
+
+    def test_tools_and_memories_combined(self):
+        from aineko.handler import format_tool_footer
+
+        history = [
+            self._rec("bash"),
+            self._rec("web_search"),
+            self._rec("memory", json.dumps({"action": "search", "query": "q"})),
+            self._rec("memory", json.dumps({"action": "store", "content": "note"})),
+        ]
+        assert format_tool_footer(history) == "\n\n*— 2 tools, 1 memory*"
+
+    def test_only_memory_reads_returns_empty(self):
+        from aineko.handler import format_tool_footer
+
+        history = [
+            self._rec("memory", json.dumps({"action": "search", "query": "q"})),
+            self._rec("memory", json.dumps({"action": "facts_query", "entity": "X"})),
+        ]
+        assert format_tool_footer(history) == ""
+
+    def test_malformed_memory_arguments_ignored(self):
+        from aineko.handler import format_tool_footer
+
+        history = [
+            self._rec("memory", "not valid json"),
+            self._rec("bash"),
+        ]
+        assert format_tool_footer(history) == "\n\n*— 1 tool*"
+
+
 # --- load_conversation ---
 
 

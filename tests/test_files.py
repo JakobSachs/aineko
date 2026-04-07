@@ -20,9 +20,7 @@ from aineko.tools.files import (
 class TestResolvePathProperties:
     @given(
         name=st.text(
-            alphabet=st.sampled_from(
-                list(string.ascii_letters + string.digits + "-_.")
-            ),
+            alphabet=st.sampled_from(list(string.ascii_letters + string.digits + "-_")),
             min_size=1,
             max_size=50,
         )

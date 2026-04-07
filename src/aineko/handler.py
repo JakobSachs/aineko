@@ -19,7 +19,7 @@ from aineko.tools.registry import ToolRegistry
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from aineko.kimi.client import ChatResponse
+    from aineko.kimi.client import ChatResponse, ToolCallRecord
     from aineko.matrix.client import MatrixConnector
     from aineko.schemas.message import IncomingMessage
     from aineko.tools.background_task import BackgroundTaskManager
@@ -27,6 +27,44 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _COMMAND_WORDS = frozenset(("/reset", "/clear", "/forget"))
+
+# Tools that produce user-visible output (matrix messages/files). Excluded from
+# the tool-count footer since the user already sees them.
+_VISIBLE_TOOLS = frozenset(("send_message", "send_file"))
+_HIDDEN_TOOLS = frozenset(("memory",))
+
+_MEMORY_WRITE_ACTIONS = frozenset(("store", "facts_add"))
+
+
+def format_tool_footer(tool_history: list[ToolCallRecord]) -> str:
+    """Return an italic footer with the count of non-visible tools used.
+
+    Appended to final model responses so the user can see at a glance whether
+    the model did background work (bash, web_search, file reads, etc.) beyond
+    just talking. Also shows how many new memory entries were created.
+    Returns an empty string if no background tools ran and no memories stored.
+    """
+    excluded = _VISIBLE_TOOLS | _HIDDEN_TOOLS
+    tool_count = sum(1 for rec in tool_history if rec.tool_name not in excluded)
+
+    memory_writes = 0
+    for rec in tool_history:
+        if rec.tool_name == "memory":
+            try:
+                args = json.loads(rec.arguments) if rec.arguments else {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if args.get("action") in _MEMORY_WRITE_ACTIONS:
+                memory_writes += 1
+
+    parts: list[str] = []
+    if tool_count:
+        parts.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}")
+    if memory_writes:
+        parts.append(f"{memory_writes} memor{'ies' if memory_writes != 1 else 'y'}")
+    if not parts:
+        return ""
+    return f"\n\n*— {', '.join(parts)}*"
 
 
 async def handle_command(

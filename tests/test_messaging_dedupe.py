@@ -513,9 +513,9 @@ class TestChatLoopDedup:
         assert send_count == 2
 
     @pytest.mark.asyncio
-    async def test_intermediate_sent_when_no_send_message_tool(self):
-        """When model returns content + non-send tools, intermediate
-        content should still be sent."""
+    async def test_intermediate_not_auto_sent(self):
+        """Intermediate content (text alongside tool calls) is NOT auto-sent.
+        The model must use send_message explicitly to communicate."""
         from unittest.mock import MagicMock
         from aineko.kimi.client import KimiClient, ChatResponse, ToolCall
         from aineko.tools.registry import ToolDef, ToolRegistry
@@ -590,5 +590,5 @@ class TestChatLoopDedup:
         messages = [{"role": "user", "content": "hi"}]
         await client.chat_loop(messages, registry)
 
-        # Intermediate content should have been sent
-        assert send_count == 1
+        # Intermediate content is NOT auto-sent; model must use send_message explicitly
+        assert send_count == 0

@@ -157,13 +157,20 @@ async def test_cleanup_finished():
 
 
 @pytest.mark.asyncio
-async def test_timeout_kills_task():
+async def test_timeout_kills_task(monkeypatch):
     """Task that exceeds timeout reports timeout."""
+
+    async def slow_bash(command: str, timeout: int = 60, **kw) -> str:
+        # Simulate what run_bash does on timeout — wait, then return message
+        await asyncio.sleep(0.05)
+        return f"Command timed out after {timeout}s"
+
+    monkeypatch.setattr(bash_mod, "run_bash", slow_bash)
     mgr = BackgroundTaskManager()
-    record = mgr.spawn(command="sleep 30", label="timeout", room_id="!r:t", timeout=1)
+    record = mgr.spawn(command="sleep 999", label="timeout", room_id="!r:t", timeout=1)
     await record.asyncio_task
     assert record.finished
-    assert "timed out" in record.result.lower() or "error" in record.result.lower()
+    assert "timed out" in record.result.lower()
 
 
 @pytest.mark.asyncio

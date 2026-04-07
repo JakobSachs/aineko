@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 
 from aineko.db import get_session
+from aineko.handler import format_tool_footer
 from aineko.kimi.client import KimiClient
 from aineko.matrix.client import MatrixConnector
 from aineko.models.cron import CronJob, CronRun, RunStatus
@@ -56,7 +57,8 @@ async def run_cron_job(
 
             # Deliver to Matrix
             if response.content and job.delivery_room:
-                await matrix.send_message(job.delivery_room, response.content)
+                footer = format_tool_footer(response.tool_history)
+                await matrix.send_message(job.delivery_room, response.content + footer)
 
         except Exception as e:
             logger.exception("Cron job %s failed", job.name)

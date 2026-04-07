@@ -275,30 +275,9 @@ class KimiClient:
                 response.tool_history = tool_history
                 return response
 
-            # Send intermediate content as a progress update
-            if (
-                response.content
-                and response.content.strip()
-                and tools.get("send_message")
-            ):
-                if not dedup.is_duplicate(response.content):
-                    logger.info(
-                        "sending intermediate content",
-                        extra={
-                            "event": "intermediate_msg",
-                            "content": response.content[:200],
-                        },
-                    )
-                    await tools.call("send_message", {"message": response.content})
-                    dedup.track_sent(response.content)
-                else:
-                    logger.info(
-                        "skipping duplicate intermediate content",
-                        extra={
-                            "event": "intermediate_skip",
-                            "content": response.content[:200],
-                        },
-                    )
+            # Intermediate text (model narration alongside tool calls) is NOT
+            # auto-sent. The model has send_message for explicit communication.
+            # Auto-sending caused duplicate/spammy messages.
 
             # Append assistant message with content blocks
             messages.append(
