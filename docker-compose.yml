@@ -7,6 +7,7 @@ services:
       - ~/Obsidian:/data/vault:ro
       - /opt/rocm:/opt/rocm:ro
       - /usr/lib/x86_64-linux-gnu/libstdc++.so.6:/usr/lib/x86_64-linux-gnu/libstdc++.so.6:ro
+      - chroma-cache:/root/.cache/chroma
     ports:
       - "8080:8080"
     env_file:
@@ -19,3 +20,5 @@ services:
     security_opt:
       - label=disable  # sometimes needed for amdgpu
 
+volumes:
+  chroma-cache:

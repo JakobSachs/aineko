@@ -293,7 +293,8 @@ class TestLoadConversation:
         # Messages: system + user
         assert messages[0]["role"] == "system"
         assert messages[-1]["role"] == "user"
-        assert messages[-1]["content"] == "hello"
+        assert "hello" in messages[-1]["content"]
+        assert "[sent " in messages[-1]["content"]
 
     @pytest.mark.asyncio
     async def test_reuses_existing_session(self, db, msg):

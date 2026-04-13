@@ -161,6 +161,10 @@ async def load_conversation(
             )
         elif m.role == Role.SYSTEM:
             messages.append({"role": "system", "content": m.content})
+        elif m.role == Role.USER:
+            # Tag every user message with its timestamp so the model perceives time
+            tag = f"\n[sent {m.created_at.strftime('%Y-%m-%d %H:%M UTC')}]"
+            messages.append({"role": "user", "content": m.content + tag})
         else:
             messages.append({"role": m.role.value, "content": m.content})
 
