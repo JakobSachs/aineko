@@ -212,10 +212,13 @@ class MatrixConnector:
         logger.info("Matrix: initial sync...")
         resp = await self._client.sync(timeout=10_000, full_state=True)
 
-        # Auto-join any pending invites
-        for room_id in self._client.invited_rooms:
-            logger.info("Matrix: auto-joining room %s", room_id)
-            await self._client.join(room_id)
+        # Auto-join any pending invites — only when no owner is configured.
+        # When owner is set we can't easily verify the inviter from the bulk
+        # invited_rooms list, so we defer to the per-event _on_invite handler.
+        if not self._settings.owner:
+            for room_id in self._client.invited_rooms:
+                logger.info("Matrix: auto-joining room %s", room_id)
+                await self._client.join(room_id)
 
         # Persist next_batch so the next restart picks up where we left off
         self._save_sync_token()
@@ -337,6 +340,14 @@ class MatrixConnector:
         if self._settings.room_list and room.room_id not in self._settings.room_list:
             return
 
+        if self._settings.owner and event.sender != self._settings.owner:
+            logger.warning(
+                "Matrix: dropping message from non-owner %s in %s",
+                event.sender,
+                room.room_id,
+            )
+            return
+
         if self._queue is None:
             logger.warning("No message handler registered, dropping message")
             return
@@ -374,6 +385,13 @@ class MatrixConnector:
         ):
             return
         if self._settings.room_list and room.room_id not in self._settings.room_list:
+            return
+        if self._settings.owner and event.sender != self._settings.owner:
+            logger.warning(
+                "Matrix: dropping file from non-owner %s in %s",
+                event.sender,
+                room.room_id,
+            )
             return
         if self._queue is None:
             return
@@ -456,12 +474,20 @@ class MatrixConnector:
         )
 
     async def _on_invite(self, room: MatrixRoom, event: InviteMemberEvent) -> None:
-        """Auto-join rooms we're invited to."""
-        if event.state_key == self._settings.user_id and event.membership == "invite":
-            logger.info(
-                "Matrix: invited to %s by %s, joining...", room.room_id, event.sender
+        """Auto-join rooms — only when invited by the owner."""
+        if event.state_key != self._settings.user_id or event.membership != "invite":
+            return
+        if self._settings.owner and event.sender != self._settings.owner:
+            logger.warning(
+                "Matrix: ignoring invite to %s from non-owner %s",
+                room.room_id,
+                event.sender,
             )
-            await self._client.join(room.room_id)
+            return
+        logger.info(
+            "Matrix: invited to %s by %s, joining...", room.room_id, event.sender
+        )
+        await self._client.join(room.room_id)
 
     async def _on_key_request(self, event: RoomKeyRequest) -> None:
         """Log key requests."""

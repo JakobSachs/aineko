@@ -14,6 +14,7 @@ class MatrixSettings(BaseSettings):
     access_token: str = ""
     password: str = ""  # used for initial login if no access_token
     rooms: str = ""  # comma-separated room IDs
+    owner: str = ""  # only this matrix user is allowed to talk to the bot
 
     @property
     def room_list(self) -> list[str]:
