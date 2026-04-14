@@ -354,10 +354,12 @@ class MatrixConnector:
 
         from datetime import datetime, timezone
 
+        body = _format_reply_body(event)
+
         msg = IncomingMessage(
             room_id=room.room_id,
             sender=event.sender,
-            body=event.body,
+            body=body,
             timestamp=datetime.fromtimestamp(
                 event.server_timestamp / 1000, tz=timezone.utc
             ),
@@ -512,6 +514,61 @@ class MatrixConnector:
             if not self._client.olm.is_device_verified(device):
                 self._client.verify_device(device)
                 logger.info("Trusted device %s for %s", device.device_id, user_id)
+
+
+def _format_reply_body(event: RoomMessageText) -> str:
+    """If the event is a reply, reformat the body so the original message is
+    explicit for the LLM.
+
+    Matrix spec puts a quoted fallback at the top of a reply body:
+
+        > <@alice:example.com> original text
+        > second line of original
+
+        my reply text
+
+    We turn that into:
+
+        [in reply to @alice:example.com: "original text\\nsecond line of original"]
+        my reply text
+
+    so the model doesn't have to guess at the `>`-quote convention. If the event
+    isn't a reply (no m.in_reply_to), body is returned unchanged.
+    """
+    relates_to = event.source.get("content", {}).get("m.relates_to") or {}
+    if "m.in_reply_to" not in relates_to:
+        return event.body
+
+    lines = event.body.split("\n")
+    quoted: list[str] = []
+    i = 0
+    while i < len(lines) and lines[i].startswith(">"):
+        # Strip leading "> " or ">" marker
+        quoted.append(lines[i][2:] if lines[i].startswith("> ") else lines[i][1:])
+        i += 1
+    # Skip one or more blank separator lines
+    while i < len(lines) and lines[i] == "":
+        i += 1
+    new_body = "\n".join(lines[i:]).strip()
+
+    if not quoted:
+        return event.body  # malformed fallback — leave as-is
+
+    # First quoted line is "<@user:server> first-line"; split off the sender.
+    first = quoted[0]
+    orig_sender = ""
+    if first.startswith("<") and "> " in first:
+        end = first.index("> ")
+        orig_sender = first[1:end]
+        quoted[0] = first[end + 2 :]
+    original = "\n".join(quoted).strip()
+
+    prefix = (
+        f'[in reply to {orig_sender}: "{original}"]'
+        if orig_sender
+        else f'[in reply to: "{original}"]'
+    )
+    return f"{prefix}\n{new_body}" if new_body else prefix
 
 
 def _markdown_to_html(text: str) -> str:
