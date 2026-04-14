@@ -11,7 +11,9 @@ def _make_event(body: str, in_reply_to: str | None) -> SimpleNamespace:
     content: dict = {"body": body, "msgtype": "m.text"}
     if in_reply_to is not None:
         content["m.relates_to"] = {"m.in_reply_to": {"event_id": in_reply_to}}
-    return SimpleNamespace(body=body, source={"content": content})
+    return SimpleNamespace(
+        body=body, sender="@test:example.com", source={"content": content}
+    )
 
 
 def test_non_reply_body_unchanged() -> None:

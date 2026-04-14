@@ -354,7 +354,7 @@ class MatrixConnector:
 
         from datetime import datetime, timezone
 
-        body = _format_reply_body(event)
+        body = await self._resolve_reply_body(room.room_id, event)
 
         msg = IncomingMessage(
             room_id=room.room_id,
@@ -376,6 +376,41 @@ class MatrixConnector:
         )
 
         await self._queue.enqueue(msg)
+
+    async def _resolve_reply_body(self, room_id: str, event: RoomMessageText) -> str:
+        """Return the message body with reply context prepended.
+
+        Tries the Matrix fallback quote first; if the client didn't include it
+        (modern clients often omit it), fetches the original event via the API.
+        """
+        body = _format_reply_body(event)
+        if body != event.body:
+            return body  # fallback parse succeeded
+
+        relates_to = event.source.get("content", {}).get("m.relates_to") or {}
+        reply_to_id = (relates_to.get("m.in_reply_to") or {}).get("event_id")
+        if not reply_to_id:
+            return body  # not a reply
+
+        # Fallback parse failed — fetch the original event
+        try:
+            from nio import RoomGetEventResponse
+
+            resp = await self._client.room_get_event(room_id, reply_to_id)
+            if isinstance(resp, RoomGetEventResponse):
+                orig = resp.event
+                orig_body = getattr(orig, "body", None) or ""
+                orig_sender = getattr(orig, "sender", "")
+                prefix = (
+                    f'[in reply to {orig_sender}: "{orig_body[:300]}"]'
+                    if orig_sender
+                    else f'[in reply to: "{orig_body[:300]}"]'
+                )
+                return f"{prefix}\n{event.body}"
+        except Exception:
+            logger.debug("Could not fetch reply target %s", reply_to_id)
+
+        return body
 
     async def _on_room_file(
         self, room: MatrixRoom, event: RoomMessageFile | RoomMessageImage
@@ -538,6 +573,15 @@ def _format_reply_body(event: RoomMessageText) -> str:
     relates_to = event.source.get("content", {}).get("m.relates_to") or {}
     if "m.in_reply_to" not in relates_to:
         return event.body
+
+    logger.info(
+        "reply detected",
+        extra={
+            "event": "reply_in",
+            "in_reply_to": relates_to["m.in_reply_to"].get("event_id"),
+            "sender": event.sender,
+        },
+    )
 
     lines = event.body.split("\n")
     quoted: list[str] = []
