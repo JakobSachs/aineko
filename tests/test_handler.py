@@ -377,7 +377,11 @@ class TestLoadConversation:
         last = messages[-1]
         assert isinstance(last["content"], list)
         assert last["content"][0]["type"] == "text"
-        assert last["content"][1]["type"] == "image_url"
+        img_block = last["content"][1]
+        assert img_block["type"] == "image"
+        assert img_block["source"]["type"] == "base64"
+        assert img_block["source"]["media_type"] == "image/png"
+        assert img_block["source"]["data"] == "abc123"
 
 
 # --- persist_response ---

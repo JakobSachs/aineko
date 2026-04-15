@@ -174,8 +174,12 @@ async def load_conversation(
         last_user["content"] = [
             {"type": "text", "text": last_user["content"]},
             {
-                "type": "image_url",
-                "image_url": {"url": f"data:{msg.image_mime};base64,{msg.image_b64}"},
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": msg.image_mime,
+                    "data": msg.image_b64,
+                },
             },
         ]
 

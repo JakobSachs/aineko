@@ -49,6 +49,9 @@ from aineko.tools.search_chat import search_chat_tool
 from aineko.tools.tool_history import search_tool_history_tool
 from aineko.tools.background_task import BackgroundTaskManager
 from aineko.tools.web_search import web_search_tool
+from aineko.tools.web_fetch import web_fetch_tool
+from aineko.tools import image as image_mod
+from aineko.tools.image import image_tool
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,8 @@ def build_tools() -> ToolRegistry:
     registry.register(glob_tool)
     registry.register(grep_tool)
     registry.register(web_search_tool)
+    registry.register(web_fetch_tool)
+    registry.register(image_tool)
     registry.register(create_skill_tool)
     registry.register(memory_tool)
     registry.register(search_tool_history_tool)
@@ -193,6 +198,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Tools
     tools: ToolRegistry = build_tools()
     web_search_mod.brave_api_key = settings.brave_api_key
+    image_mod._settings = settings.kimi
     calendar_mod.caldav_url = settings.caldav.url
     calendar_mod.caldav_username = settings.caldav.username
     calendar_mod.caldav_password = settings.caldav.password

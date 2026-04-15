@@ -4,6 +4,8 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any
 
+ToolResult = str | list[dict[str, Any]]
+
 
 @dataclass
 class ToolDef:
@@ -12,7 +14,7 @@ class ToolDef:
     name: str
     description: str
     parameters: dict[str, Any]  # JSON Schema
-    handler: Callable[..., Coroutine[Any, Any, str]]
+    handler: Callable[..., Coroutine[Any, Any, ToolResult]]
 
 
 class ToolRegistry:
@@ -39,7 +41,7 @@ class ToolRegistry:
             for t in self._tools.values()
         ]
 
-    async def call(self, name: str, arguments: dict[str, Any]) -> str:
+    async def call(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         tool = self._tools.get(name)
         if tool is None:
             return f"Error: unknown tool '{name}'"

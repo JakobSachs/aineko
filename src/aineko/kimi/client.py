@@ -339,7 +339,8 @@ class KimiClient:
                     },
                 )
                 result = await tools.call(tc.name, tc.arguments)
-                tool_history.append(ToolCallRecord(tc.name, args_json, result))
+                result_str = result if isinstance(result, str) else "[content blocks]"
+                tool_history.append(ToolCallRecord(tc.name, args_json, result_str))
 
                 # Track successful send_message for dedup
                 if tc.name == "send_message":
@@ -349,8 +350,14 @@ class KimiClient:
                     extra={
                         "event": "tool_result",
                         "tool": tc.name,
-                        "result_len": len(result),
-                        "result_preview": result[:200],
+                        "result_len": (
+                            len(result) if isinstance(result, str) else len(result)
+                        ),
+                        "result_preview": (
+                            result[:200]
+                            if isinstance(result, str)
+                            else str(result[0])[:200]
+                        ),
                     },
                 )
                 tool_results.append((tc.id, result, False))
