@@ -41,6 +41,7 @@ class ChatResponse:
     usage: dict[str, int] = field(default_factory=dict)
     finish_reason: str = ""
     tool_history: list[ToolCallRecord] = field(default_factory=list)
+    intermediate_messages: list[str] = field(default_factory=list)
 
 
 class KimiClient:
@@ -264,6 +265,7 @@ class KimiClient:
     ) -> ChatResponse:
         """Run the chat → tool call → chat loop until the agent produces a final response."""
         tool_history: list[ToolCallRecord] = []
+        intermediate_messages: list[str] = []
         recent_calls: list[tuple[str, str]] = []
         rounds_since_checkpoint = 0
         dedup = MessageDeduplicator()
@@ -273,11 +275,14 @@ class KimiClient:
 
             if not response.tool_calls:
                 response.tool_history = tool_history
+                response.intermediate_messages = intermediate_messages
                 return response
 
-            # Intermediate text (model narration alongside tool calls) is NOT
-            # auto-sent. The model has send_message for explicit communication.
-            # Auto-sending caused duplicate/spammy messages.
+            # Collect intermediate text alongside tool calls so app.py can
+            # send it. Dedup handles the case where the model also calls
+            # send_message with the same text.
+            if response.content:
+                intermediate_messages.append(response.content)
 
             # Append assistant message with content blocks
             messages.append(

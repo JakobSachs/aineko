@@ -40,8 +40,9 @@ def test_compaction_respects_reserve():
     for i in range(90):
         messages.append({"role": "user", "content": "x" * 2000})
     # 90 * 2000 / 4 = 45k tokens
-    # With 50k max and 20k reserve, threshold is 30k — should trigger
-    assert should_compact(messages, max_tokens=50_000) is True
+    # With 50k max and reserve=0, threshold is 50k — not quite there
+    # Use 40k max so 45k tokens exceeds it
+    assert should_compact(messages, max_tokens=40_000) is True
 
 
 def test_no_compaction_when_under_threshold():

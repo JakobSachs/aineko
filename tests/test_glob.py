@@ -80,9 +80,11 @@ async def test_glob_returns_absolute_paths(data_dir):
 
 
 @pytest.mark.asyncio
-async def test_glob_path_traversal_blocked(data_dir):
-    result = await glob_files("*.py", path="../../etc")
-    assert "Error" in result or "escapes" in result.lower()
+async def test_glob_absolute_path(tmp_path):
+    """Absolute paths work anywhere in the container."""
+    (tmp_path / "a.py").write_text("")
+    result = await glob_files("*.py", path=str(tmp_path))
+    assert str(tmp_path / "a.py") in result
 
 
 @pytest.mark.asyncio

@@ -173,9 +173,11 @@ async def test_grep_empty_output_after_parse(data_dir):
 
 
 @pytest.mark.asyncio
-async def test_grep_path_traversal_blocked(data_dir):
-    result = await grep_files("test", path="../../etc")
-    assert "Error" in result or "escapes" in result.lower()
+async def test_grep_absolute_path(tmp_path):
+    """Absolute paths work anywhere in the container."""
+    (tmp_path / "src.py").write_text("hello world\n")
+    result = await grep_files("hello", path=str(tmp_path))
+    assert "hello" in result
 
 
 # --- Mocked subprocess tests for parsing edge cases ---

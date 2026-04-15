@@ -14,11 +14,9 @@ MAX_LINE_LENGTH = 2000
 
 
 def _resolve_path(path: str) -> Path:
-    """Resolve path relative to /data, block traversal."""
-    resolved = (DATA_ROOT / path).resolve()
-    if not str(resolved).startswith(str(DATA_ROOT)):
-        raise ValueError(f"Path escapes data directory: {path}")
-    return resolved
+    """Resolve path. Absolute paths are used as-is; relative paths are relative to /data."""
+    p = Path(path)
+    return p.resolve() if p.is_absolute() else (DATA_ROOT / path).resolve()
 
 
 BINARY_EXTENSIONS = {
@@ -205,7 +203,7 @@ async def edit_file(
 read_file_tool = ToolDef(
     name="read_file",
     description=(
-        "Read a file or directory from /data. Path is relative to /data.\n\n"
+        "Read a file or directory. Relative paths are relative to /data; absolute paths (e.g. /app/src) work anywhere in the container.\n\n"
         "Usage:\n"
         "- By default returns up to 2000 lines from the start of the file.\n"
         "- The offset parameter is the line number to start from (1-indexed).\n"
@@ -219,7 +217,10 @@ read_file_tool = ToolDef(
     parameters={
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "File path relative to /data"},
+            "path": {
+                "type": "string",
+                "description": "File path — relative to /data, or absolute (e.g. /app/src/aineko/app.py)",
+            },
             "offset": {
                 "type": "integer",
                 "description": "Line number to start from (1-indexed)",
@@ -240,7 +241,10 @@ write_file_tool = ToolDef(
     parameters={
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "File path relative to /data"},
+            "path": {
+                "type": "string",
+                "description": "File path — relative to /data, or absolute",
+            },
             "content": {"type": "string", "description": "Full file content to write"},
         },
         "required": ["path", "content"],
@@ -263,7 +267,10 @@ edit_file_tool = ToolDef(
     parameters={
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "File path relative to /data"},
+            "path": {
+                "type": "string",
+                "description": "File path — relative to /data, or absolute",
+            },
             "old_text": {
                 "type": "string",
                 "description": "Exact text to find",

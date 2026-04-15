@@ -8,6 +8,7 @@ services:
       - /opt/rocm:/opt/rocm:ro
       - /usr/lib/x86_64-linux-gnu/libstdc++.so.6:/usr/lib/x86_64-linux-gnu/libstdc++.so.6:ro
       - chroma-cache:/root/.cache/chroma
+      - ~/.cache/uv:/root/.cache/uv
     ports:
       - "8080:8080"
     env_file:

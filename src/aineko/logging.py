@@ -41,6 +41,9 @@ class StructuredFormatter(logging.Formatter):
             "tool_names",
             "msg_count",
             "endpoint",
+            "estimated_tokens",
+            "max_tokens",
+            "thinking",
         ):
             val = getattr(record, key, None)
             if val is not None:

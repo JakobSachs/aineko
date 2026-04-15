@@ -172,3 +172,80 @@ async def test_different_tools_dont_trigger_doom_loop():
 
     await client.chat_loop([{"role": "user", "content": "test"}], registry)
     assert len(call_log) == 3
+
+
+# --- Intermediate messages ---
+
+
+@pytest.mark.asyncio
+async def test_intermediate_content_collected():
+    """Text alongside a tool call is collected as an intermediate message."""
+    client = KimiClient(_make_settings())
+
+    async def fake_chat(messages, tools=None):
+        if len(messages) < 4:
+            return _make_tool_response(
+                "bash", {"command": "ls"}, content="looking now..."
+            )
+        return _make_final_response("done")
+
+    client.chat = fake_chat
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDef(name="bash", description="run", parameters={}, handler=lambda **_: "ok")
+    )
+
+    result = await client.chat_loop([{"role": "user", "content": "hi"}], registry)
+    assert "looking now..." in result.intermediate_messages
+
+
+@pytest.mark.asyncio
+async def test_intermediate_content_empty_when_no_text():
+    """No intermediate messages when tool calls have no accompanying text."""
+    client = KimiClient(_make_settings())
+
+    async def fake_chat(messages, tools=None):
+        if len(messages) < 4:
+            return _make_tool_response("bash", {"command": "ls"}, content="")
+        return _make_final_response("done")
+
+    client.chat = fake_chat
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDef(name="bash", description="run", parameters={}, handler=lambda **_: "ok")
+    )
+
+    result = await client.chat_loop([{"role": "user", "content": "hi"}], registry)
+    assert result.intermediate_messages == []
+
+
+@pytest.mark.asyncio
+async def test_multiple_intermediate_messages_collected():
+    """Multiple rounds of intermediate text are all collected."""
+    client = KimiClient(_make_settings())
+    call_count = 0
+
+    async def fake_chat(messages, tools=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _make_tool_response(
+                "bash", {"command": "step1"}, content="step 1..."
+            )
+        if call_count == 2:
+            return _make_tool_response(
+                "bash", {"command": "step2"}, content="step 2..."
+            )
+        return _make_final_response("all done")
+
+    client.chat = fake_chat
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDef(name="bash", description="run", parameters={}, handler=lambda **_: "ok")
+    )
+
+    result = await client.chat_loop([{"role": "user", "content": "hi"}], registry)
+    assert result.intermediate_messages == ["step 1...", "step 2..."]

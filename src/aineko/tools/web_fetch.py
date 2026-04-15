@@ -11,7 +11,9 @@ from aineko.tools.registry import ToolDef, ToolResult
 
 logger = logging.getLogger(__name__)
 
-_BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0"
+_BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0 aineko/1.0"
+)
 _PLAIN_UA = "curl/8.7.1"
 _MAX_SIZE = 5_000_000  # 5 MB
 _MAX_OUTPUT = 100_000  # chars

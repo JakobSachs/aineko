@@ -37,10 +37,11 @@ class TestResolvePathProperties:
             max_size=10,
         ),
     )
-    def test_traversal_always_blocked(self, depth: int, name: str):
+    def test_relative_path_resolves_without_error(self, depth: int, name: str):
+        # Traversal is now allowed anywhere in the container
         evil_path = "../" * depth + name
-        with pytest.raises(ValueError, match="escapes data directory"):
-            _resolve_path(evil_path)
+        result = _resolve_path(evil_path)
+        assert result.is_absolute()
 
 
 class TestEditFileProperties:
@@ -300,18 +301,28 @@ async def test_read_binary_by_content(data_dir):
 
 
 @pytest.mark.asyncio
-async def test_read_blocks_traversal(data_dir):
-    result = await read_file("../../etc/passwd")
-    assert "Error" in result
+async def test_read_absolute_path(tmp_path):
+    """Absolute paths work anywhere in the container."""
+    f = tmp_path / "secret.txt"
+    f.write_text("hello from absolute path")
+    result = await read_file(str(f))
+    assert "hello from absolute path" in result
 
 
 @pytest.mark.asyncio
-async def test_write_blocks_traversal(data_dir):
-    result = await write_file("../../tmp/evil.txt", "pwned")
-    assert "Error" in result
+async def test_write_absolute_path(tmp_path):
+    """Writes to absolute paths work."""
+    f = tmp_path / "out.txt"
+    result = await write_file(str(f), "written via absolute path")
+    assert "Error" not in result
+    assert f.read_text() == "written via absolute path"
 
 
 @pytest.mark.asyncio
-async def test_edit_blocks_traversal(data_dir):
-    result = await edit_file("../../etc/passwd", "root", "hacked")
-    assert "Error" in result
+async def test_edit_absolute_path(tmp_path):
+    """Edits to absolute paths work."""
+    f = tmp_path / "edit_me.txt"
+    f.write_text("old content")
+    result = await edit_file(str(f), "old content", "new content")
+    assert "Error" not in result
+    assert f.read_text() == "new content"

@@ -135,6 +135,19 @@ async def handle_message(
         sys_prompt: str = build_system_prompt(skills, soul_path, memory_dir)
         session, user_msg, messages = await load_conversation(db, msg, sys_prompt)
 
+        from aineko.context import estimate_tokens
+
+        estimated_ctx = sum(estimate_tokens(m.get("content")) for m in messages)
+        logger.info(
+            "context size",
+            extra={
+                "event": "context_size",
+                "estimated_tokens": estimated_ctx,
+                "max_tokens": max_context_tokens,
+                "msg_count": len(messages),
+            },
+        )
+
         # Compact if conversation is getting long
         if should_compact(messages, max_context_tokens):
             logger.info("conversation approaching context limit, compacting")
@@ -174,6 +187,11 @@ async def handle_message(
         messages = trim_messages(messages, max_context_tokens)
 
         response: ChatResponse = await kimi.chat_loop(messages, request_tools)
+
+        for intermediate in response.intermediate_messages:
+            if intermediate not in sent_messages:
+                await matrix.send_message(msg.room_id, intermediate)
+                sent_messages.append(intermediate)
 
         if response.content:
             footer: str = format_tool_footer(response.tool_history)

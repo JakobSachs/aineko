@@ -10,10 +10,8 @@ MAX_RESULTS = 100
 
 
 def _resolve_path(path: str) -> Path:
-    resolved = (DATA_ROOT / path).resolve()
-    if not str(resolved).startswith(str(DATA_ROOT)):
-        raise ValueError(f"Path escapes data directory: {path}")
-    return resolved
+    p = Path(path)
+    return p.resolve() if p.is_absolute() else (DATA_ROOT / path).resolve()
 
 
 async def glob_files(pattern: str, path: str = "") -> str:
@@ -65,7 +63,7 @@ glob_tool = ToolDef(
             },
             "path": {
                 "type": "string",
-                "description": "Directory to search in, relative to /data (defaults to /data root)",
+                "description": "Directory to search in — relative to /data, or absolute (defaults to /data root)",
             },
         },
         "required": ["pattern"],

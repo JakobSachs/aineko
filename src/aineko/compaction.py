@@ -16,7 +16,7 @@ from aineko.context import estimate_tokens
 logger = logging.getLogger(__name__)
 
 # Reserve buffer: trigger compaction this many tokens before the hard limit
-COMPACTION_RESERVE = 20_000
+COMPACTION_RESERVE = 0
 
 # Minimum messages in conversation before compaction is even considered
 # (system + at least 6 conversation messages)

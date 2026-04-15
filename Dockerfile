@@ -12,11 +12,12 @@ RUN apt-get update && \
 
 # Install uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:${PATH}"
+ENV PATH="/root/.local/bin:${PATH}" \
+    UV_LINK_MODE=copy
 
 # Copy dependency files first (cache layer)
 COPY pyproject.toml uv.lock ./
-RUN uv sync --no-dev --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --no-dev --no-install-project
 
 # Copy source, readme, alembic
 COPY README.md ./
