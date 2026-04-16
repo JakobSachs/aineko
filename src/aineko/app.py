@@ -46,6 +46,7 @@ from aineko.tools.memory import memory_tool
 from aineko.tools import calendar as calendar_mod
 from aineko.tools import web_search as web_search_mod
 from aineko.tools.calendar import read_calendar_tool
+from aineko.tools.rss import query_rss_tool
 from aineko.tools.search_chat import search_chat_tool
 from aineko.tools.tool_history import search_tool_history_tool
 from aineko.tools.background_task import BackgroundTaskManager
@@ -71,6 +72,7 @@ def build_tools() -> ToolRegistry:
     registry.register(create_skill_tool)
     registry.register(memory_tool)
     registry.register(search_tool_history_tool)
+    registry.register(query_rss_tool)
     registry.register(search_chat_tool)
     registry.register(read_calendar_tool)
     return registry
