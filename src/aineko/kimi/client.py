@@ -38,6 +38,7 @@ class ToolCallRecord:
 class ChatResponse:
     content: str = ""
     reasoning_content: str | None = None
+    thinking_blocks: list[dict[str, Any]] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
     finish_reason: str = ""
@@ -170,6 +171,7 @@ class KimiClient:
 
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
+        thinking_blocks: list[dict[str, Any]] = []
         tool_calls: list[ToolCall] = []
 
         for block in content_blocks:
@@ -178,6 +180,11 @@ class KimiClient:
                 text_parts.append(block.get("text", ""))
             elif btype == "thinking":
                 reasoning_parts.append(block.get("thinking", ""))
+                # Preserve the raw block (including signature) for replay.
+                thinking_blocks.append(
+                    {k: v for k, v in block.items() if k != "type"}
+                    | {"type": "thinking"}
+                )
             elif btype == "tool_use":
                 tool_calls.append(
                     ToolCall(
@@ -190,6 +197,7 @@ class KimiClient:
         result = ChatResponse(
             content="\n".join(text_parts) if text_parts else "",
             reasoning_content="\n".join(reasoning_parts) if reasoning_parts else None,
+            thinking_blocks=thinking_blocks,
             tool_calls=tool_calls,
             usage=usage,
             finish_reason=stop_reason,
@@ -220,11 +228,21 @@ class KimiClient:
         return result
 
     def _build_assistant_content(self, response: ChatResponse) -> list[dict[str, Any]]:
-        """Build Anthropic-format content blocks for an assistant message."""
+        """Build Anthropic-format content blocks for an assistant message.
+
+        Replays thinking blocks verbatim (preserving signatures) so the API
+        accepts them in multi-turn context. When tool_use is present, drops
+        any accompanying text content — the model tends to hallucinate
+        tool-result-shaped preambles there, and feeding them back in-context
+        trains it to do so more.
+        """
         blocks: list[dict[str, Any]] = []
-        if response.reasoning_content:
-            blocks.append({"type": "thinking", "thinking": response.reasoning_content})
-        if response.content:
+        # Replay thinking blocks verbatim (including signature).
+        for tb in response.thinking_blocks:
+            blocks.append(tb)
+        # Only include text when there are no tool calls — otherwise it's a
+        # pre-tool preamble and often contains fabricated results.
+        if response.content and not response.tool_calls:
             blocks.append({"type": "text", "text": response.content})
         for tc in response.tool_calls:
             blocks.append(
@@ -280,11 +298,19 @@ class KimiClient:
                 response.intermediate_messages = intermediate_messages
                 return response
 
-            # Send intermediate text immediately via callback, and track for dedup.
+            # Don't stream pre-tool text to the user: when content arrives
+            # alongside tool_use, it's a preamble the model wrote before any
+            # tool ran, and has been observed to contain hallucinated
+            # tool-result-shaped output. The real answer lands after tools
+            # finish, in the no-tool-calls branch above.
             if response.content:
-                intermediate_messages.append(response.content)
-                if on_intermediate:
-                    await on_intermediate(response.content)
+                logger.info(
+                    "discarding pre-tool content",
+                    extra={
+                        "event": "pretool_content_discarded",
+                        "preview": response.content[:200],
+                    },
+                )
 
             # Append assistant message with content blocks
             messages.append(

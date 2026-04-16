@@ -174,12 +174,18 @@ async def test_different_tools_dont_trigger_doom_loop():
     assert len(call_log) == 3
 
 
-# --- Intermediate messages ---
+# --- Pre-tool content dropping ---
+#
+# Kimi k2p5 was observed generating fabricated tool-result-shaped text
+# alongside tool_use blocks (see test_kimi_hallucination_guards.py). We drop
+# that text unconditionally — it's a pre-tool guess, not a real intermediate
+# update. `intermediate_messages` therefore stays empty whenever tool_use is
+# present.
 
 
 @pytest.mark.asyncio
-async def test_intermediate_content_collected():
-    """Text alongside a tool call is collected as an intermediate message."""
+async def test_pretool_content_is_dropped():
+    """Text alongside a tool call is never exposed as an intermediate message."""
     client = KimiClient(_make_settings())
 
     async def fake_chat(messages, tools=None):
@@ -197,11 +203,11 @@ async def test_intermediate_content_collected():
     )
 
     result = await client.chat_loop([{"role": "user", "content": "hi"}], registry)
-    assert "looking now..." in result.intermediate_messages
+    assert "looking now..." not in result.intermediate_messages
 
 
 @pytest.mark.asyncio
-async def test_intermediate_content_empty_when_no_text():
+async def test_intermediate_empty_when_no_text():
     """No intermediate messages when tool calls have no accompanying text."""
     client = KimiClient(_make_settings())
 
@@ -222,8 +228,8 @@ async def test_intermediate_content_empty_when_no_text():
 
 
 @pytest.mark.asyncio
-async def test_multiple_intermediate_messages_collected():
-    """Multiple rounds of intermediate text are all collected."""
+async def test_multiple_rounds_of_pretool_content_all_dropped():
+    """Every round of pre-tool content is dropped, across multiple rounds."""
     client = KimiClient(_make_settings())
     call_count = 0
 
@@ -248,4 +254,5 @@ async def test_multiple_intermediate_messages_collected():
     )
 
     result = await client.chat_loop([{"role": "user", "content": "hi"}], registry)
-    assert result.intermediate_messages == ["step 1...", "step 2..."]
+    assert result.intermediate_messages == []
+    assert result.content == "all done"
