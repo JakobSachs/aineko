@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -61,6 +61,19 @@ class CronSettings(BaseSettings):
     max_concurrent_runs: int = 1
 
 
+class RssFeedConfig(BaseModel):
+    url: str
+    name: str
+
+
+class RssSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="RSS_")
+
+    enabled: bool = False
+    room: str = ""  # defaults to first matrix room if empty
+    poll_interval: int = 300  # seconds
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AINEKO_")
 
@@ -77,6 +90,7 @@ class Settings(BaseSettings):
     heartbeat: HeartbeatSettings = Field(default_factory=HeartbeatSettings)
     caldav: CalDavSettings = Field(default_factory=CalDavSettings)
     cron: CronSettings = Field(default_factory=CronSettings)
+    rss: RssSettings = Field(default_factory=RssSettings)
 
     @property
     def db_url(self) -> str:
@@ -91,3 +105,7 @@ class Settings(BaseSettings):
     @property
     def heartbeat_file(self) -> Path:
         return self.data_dir / "HEARTBEAT.md"
+
+    @property
+    def rss_feeds_file(self) -> Path:
+        return self.data_dir / "rss_feeds.json"

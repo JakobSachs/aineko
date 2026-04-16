@@ -113,7 +113,12 @@ class MatrixConnector:
         self._queue = MessageQueue(handler)
 
     async def inject_message(
-        self, room_id: str, body: str, sender: str = "system"
+        self,
+        room_id: str,
+        body: str,
+        sender: str = "system",
+        *,
+        suppress_text_response: bool = False,
     ) -> None:
         """Inject a synthetic message into the processing queue."""
         if self._queue is None:
@@ -127,6 +132,7 @@ class MatrixConnector:
             body=body,
             timestamp=datetime.now(timezone.utc),
             event_id=f"$injected-{id(body)}",
+            suppress_text_response=suppress_text_response,
         )
         await self._queue.enqueue(msg)
 

@@ -40,3 +40,4 @@ class IncomingMessage(BaseModel):
     event_id: str
     image_b64: str | None = None  # base64-encoded image data for vision
     image_mime: str | None = None  # e.g. "image/png"
+    suppress_text_response: bool = False  # if True, only tool-based sends go through

@@ -27,6 +27,7 @@ from aineko.handler import (
     persist_response,
 )
 from aineko.heartbeat.loop import heartbeat_tick_loop
+from aineko.rss.poller import rss_poll_loop
 from aineko.heartbeat.runner import HeartbeatRunner
 from aineko.kimi.client import ChatResponse, KimiClient
 from aineko.matrix.client import MatrixConnector
@@ -195,7 +196,7 @@ async def handle_message(
             messages, request_tools, on_intermediate=on_intermediate
         )
 
-        if response.content:
+        if response.content and not msg.suppress_text_response:
             footer: str = format_tool_footer(response.tool_history)
             await matrix.send_message(msg.room_id, response.content + footer)
 
@@ -322,6 +323,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 name="heartbeat",
             )
         )
+
+    # RSS poller
+    if settings.rss.enabled:
+        import json
+
+        from aineko.config import RssFeedConfig
+
+        rss_feeds: list[RssFeedConfig] = []
+        if settings.rss_feeds_file.exists():
+            raw = json.loads(settings.rss_feeds_file.read_text())
+            rss_feeds = [RssFeedConfig(**f) for f in raw]
+        else:
+            logger.warning("RSS enabled but %s not found", settings.rss_feeds_file)
+
+        if rss_feeds:
+            rss_room: str = settings.rss.room or (
+                settings.matrix.room_list[0] if settings.matrix.room_list else ""
+            )
+            bg_tasks.append(
+                asyncio.create_task(
+                    rss_poll_loop(
+                        matrix, rss_room, rss_feeds, settings.rss.poll_interval
+                    ),
+                    name="rss-poller",
+                )
+            )
+            logger.info(
+                "RSS poller started: %d feed(s), room=%s", len(rss_feeds), rss_room
+            )
 
     logger.info("aineko started")
 
