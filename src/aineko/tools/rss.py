@@ -45,7 +45,8 @@ query_rss_tool = ToolDef(
     description=(
         "Query previously seen RSS feed items stored in the database. "
         "Use this to look up past articles, check what was posted by a feed, "
-        "or search for items by title keyword."
+        "or search for items by title keyword. "
+        "Results are returned in chronological order (oldest first within the limit)."
     ),
     parameters={
         "type": "object",
