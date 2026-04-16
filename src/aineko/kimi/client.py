@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -262,6 +263,7 @@ class KimiClient:
         tools: ToolRegistry,
         checkpoint_every: int = 10,
         max_rounds: int = 100,
+        on_intermediate: Callable[[str], Awaitable[None]] | None = None,
     ) -> ChatResponse:
         """Run the chat → tool call → chat loop until the agent produces a final response."""
         tool_history: list[ToolCallRecord] = []
@@ -278,11 +280,11 @@ class KimiClient:
                 response.intermediate_messages = intermediate_messages
                 return response
 
-            # Collect intermediate text alongside tool calls so app.py can
-            # send it. Dedup handles the case where the model also calls
-            # send_message with the same text.
+            # Send intermediate text immediately via callback, and track for dedup.
             if response.content:
                 intermediate_messages.append(response.content)
+                if on_intermediate:
+                    await on_intermediate(response.content)
 
             # Append assistant message with content blocks
             messages.append(

@@ -145,9 +145,12 @@ async def _memory(
 memory_tool = ToolDef(
     name="memory",
     description=(
-        "Mid/long-term memory — semantic search, storage, and a temporal knowledge graph. "
-        "Use 'search' to recall information, 'store' to save something, "
-        "and 'facts_*' actions to manage structured entity facts that can change over time."
+        "Mid/long-term memory — semantic search, storage, and a temporal knowledge graph.\n\n"
+        "Call search at the START of every conversation, before responding, using keywords "
+        "from what the user is asking about. A missed search costs trust; a wasted search costs nothing.\n\n"
+        "After any non-trivial conversation: store what you learned — preferences, decisions, "
+        "corrections, people, project context. Use facts_add for structured entity facts "
+        "(person X does Y), facts_invalidate when facts change."
     ),
     parameters={
         "type": "object",

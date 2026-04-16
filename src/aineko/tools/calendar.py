@@ -114,7 +114,8 @@ read_calendar_tool = ToolDef(
     name="read_calendar",
     description=(
         "Read upcoming events from the user's iCloud calendar. "
-        "Returns event titles, times, locations, and notes. Read-only."
+        "Returns event titles, times, locations, and notes. Read-only.\n\n"
+        "Known calendars: 'Private' is Jakob's own calendar. 'Freizeit' belongs to his partner."
     ),
     parameters={
         "type": "object",

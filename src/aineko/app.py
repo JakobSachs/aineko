@@ -129,7 +129,7 @@ async def handle_message(
 
         sent_messages: list[str] = []
         request_tools: ToolRegistry = build_request_tools(
-            tools, matrix, msg.room_id, sent_messages, bg_tasks
+            tools, matrix, msg.room_id, sent_messages, bg_tasks, kimi
         )
 
         sys_prompt: str = build_system_prompt(skills, soul_path, memory_dir)
@@ -186,12 +186,14 @@ async def handle_message(
 
         messages = trim_messages(messages, max_context_tokens)
 
-        response: ChatResponse = await kimi.chat_loop(messages, request_tools)
+        async def on_intermediate(text: str) -> None:
+            if text not in sent_messages:
+                await matrix.send_message(msg.room_id, text)
+                sent_messages.append(text)
 
-        for intermediate in response.intermediate_messages:
-            if intermediate not in sent_messages:
-                await matrix.send_message(msg.room_id, intermediate)
-                sent_messages.append(intermediate)
+        response: ChatResponse = await kimi.chat_loop(
+            messages, request_tools, on_intermediate=on_intermediate
+        )
 
         if response.content:
             footer: str = format_tool_footer(response.tool_history)

@@ -15,11 +15,12 @@ from aineko.tools.messaging import (
     make_send_message_tool,
 )
 from aineko.tools.registry import ToolRegistry
+from aineko.tools.subagent import make_subagent_tool
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from aineko.kimi.client import ChatResponse, ToolCallRecord
+    from aineko.kimi.client import ChatResponse, KimiClient, ToolCallRecord
     from aineko.matrix.client import MatrixConnector
     from aineko.schemas.message import IncomingMessage
     from aineko.tools.background_task import BackgroundTaskManager
@@ -92,6 +93,7 @@ def build_request_tools(
     room_id: str,
     sent_messages: list[str],
     bg_tasks: BackgroundTaskManager | None = None,
+    kimi: KimiClient | None = None,
 ) -> ToolRegistry:
     """Clone base tools and add per-request messaging tools."""
     registry = ToolRegistry()
@@ -103,6 +105,9 @@ def build_request_tools(
     if bg_tasks is not None:
         for tool_def in make_background_task_tools(bg_tasks, room_id, matrix):
             registry.register(tool_def)
+
+    if kimi is not None:
+        registry.register(make_subagent_tool(kimi, base_tools))
 
     return registry
 

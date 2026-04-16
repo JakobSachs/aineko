@@ -237,7 +237,14 @@ read_file_tool = ToolDef(
 
 write_file_tool = ToolDef(
     name="write_file",
-    description="Write content to a file in /data. Creates parent directories. Use for new files or full rewrites. For small edits to existing files, prefer edit_file.",
+    description=(
+        "Write content to a file. Creates parent directories. "
+        "Use for new files or full rewrites. For small edits to existing files, prefer edit_file.\n\n"
+        "IMPORTANT: The user cannot see file contents unless you explicitly share them. "
+        "After writing a file the user asked to see or use, either:\n"
+        "- call send_file to deliver it as an attachment, or\n"
+        "- include the content in a send_message / your final response as a code block."
+    ),
     parameters={
         "type": "object",
         "properties": {
@@ -262,7 +269,9 @@ edit_file_tool = ToolDef(
         "the line number prefix (the `N: ` part). Everything after the `N: ` is the actual content.\n"
         "- The old_text must match exactly once, unless replace_all is true.\n"
         "- Use replace_all for renaming variables or replacing a string everywhere in the file.\n"
-        "- For new files use write_file instead."
+        "- For new files use write_file instead.\n\n"
+        "IMPORTANT: The user cannot see file contents unless you explicitly share them. "
+        "If the user asked to see the result, use send_file or include the content in your response."
     ),
     parameters={
         "type": "object",
