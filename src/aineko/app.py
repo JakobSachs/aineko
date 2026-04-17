@@ -127,17 +127,23 @@ async def handle_message(
 
     assert _db.async_session_factory is not None
 
+    sent_messages: list[str] = []
+    request_tools: ToolRegistry = build_request_tools(
+        tools, matrix, msg.room_id, sent_messages, bg_tasks, kimi, cron
+    )
+    sys_prompt: str = build_system_prompt(skills, soul_path, memory_dir)
+
+    # Scope 1: command check, load conversation, compaction. Release DB
+    # connection before the LLM call so we don't pin pool slots or hold
+    # idle-in-transaction across network I/O.
     async with _db.async_session_factory() as db:
         if await handle_command(db, msg, matrix):
             return
 
-        sent_messages: list[str] = []
-        request_tools: ToolRegistry = build_request_tools(
-            tools, matrix, msg.room_id, sent_messages, bg_tasks, kimi, cron
-        )
-
-        sys_prompt: str = build_system_prompt(skills, soul_path, memory_dir)
         session, user_msg, messages = await load_conversation(db, msg, sys_prompt)
+        session_id: int = session.id
+        session_room_id: str = session.room_id
+        user_msg_id: int = user_msg.id
 
         from aineko.context import estimate_tokens
 
@@ -159,14 +165,14 @@ async def handle_message(
 
             result = await db.execute(
                 select(Message)
-                .where(Message.session_id == session.id)
+                .where(Message.session_id == session_id)
                 .order_by(Message.created_at)
             )
             history: list[Message] = list(result.scalars().all())
 
             # Ingest messages about to be compacted into long-term memory
             ingest_before_compaction(
-                messages, session.id, session.room_id, compaction_keep_recent
+                messages, session_id, session_room_id, compaction_keep_recent
             )
 
             messages, summary_text = await compact_messages(
@@ -181,29 +187,32 @@ async def handle_message(
                     )
                 db.add(
                     Message(
-                        session_id=session.id,
+                        session_id=session_id,
                         role=Role.SYSTEM,
                         content=summary_text,
                     )
                 )
-                await db.flush()
+            await db.commit()
 
-        messages = trim_messages(messages, max_context_tokens)
+    messages = trim_messages(messages, max_context_tokens)
 
-        async def on_intermediate(text: str) -> None:
-            if text not in sent_messages:
-                await matrix.send_message(msg.room_id, text)
-                sent_messages.append(text)
+    async def on_intermediate(text: str) -> None:
+        if text not in sent_messages:
+            await matrix.send_message(msg.room_id, text)
+            sent_messages.append(text)
 
-        response: ChatResponse = await kimi.chat_loop(
-            messages, request_tools, on_intermediate=on_intermediate
-        )
+    # LLM call runs with no DB connection held.
+    response: ChatResponse = await kimi.chat_loop(
+        messages, request_tools, on_intermediate=on_intermediate
+    )
 
-        if response.content and not msg.suppress_text_response:
-            footer: str = format_tool_footer(response.tool_history)
-            await matrix.send_message(msg.room_id, response.content + footer)
+    if response.content and not msg.suppress_text_response:
+        footer: str = format_tool_footer(response.tool_history)
+        await matrix.send_message(msg.room_id, response.content + footer)
 
-        await persist_response(db, session, user_msg, response, sent_messages)
+    # Scope 2: persist assistant response and tool logs.
+    async with _db.async_session_factory() as db:
+        await persist_response(db, session_id, user_msg_id, response, sent_messages)
 
 
 @asynccontextmanager

@@ -404,7 +404,7 @@ class TestPersistResponse:
         response.tool_history = []
         response.usage = {"total_tokens": 100}
 
-        await persist_response(db, s, user_msg, response, sent_messages=[])
+        await persist_response(db, s.id, user_msg.id, response, sent_messages=[])
 
         result = await db.execute(
             select(Message).where(
@@ -436,7 +436,7 @@ class TestPersistResponse:
         response.tool_history = [tool_rec]
         response.usage = {"total_tokens": 200}
 
-        await persist_response(db, s, user_msg, response, sent_messages=[])
+        await persist_response(db, s.id, user_msg.id, response, sent_messages=[])
 
         # Check tool log
         result = await db.execute(select(ToolLog).where(ToolLog.session_id == s.id))
@@ -478,7 +478,7 @@ class TestPersistResponse:
         response.usage = {"total_tokens": 50}
 
         await persist_response(
-            db, s, user_msg, response, sent_messages=["intermediate msg"]
+            db, s.id, user_msg.id, response, sent_messages=["intermediate msg"]
         )
 
         result = await db.execute(
@@ -506,7 +506,7 @@ class TestPersistResponse:
         response.tool_history = []
         response.usage = {}
 
-        await persist_response(db, s, user_msg, response, sent_messages=[])
+        await persist_response(db, s.id, user_msg.id, response, sent_messages=[])
 
         result = await db.execute(
             select(Message).where(
