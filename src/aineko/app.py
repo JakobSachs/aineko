@@ -133,16 +133,15 @@ async def handle_message(
     )
     sys_prompt: str = build_system_prompt(skills, soul_path, memory_dir)
 
-    # Scope 1: command check, load conversation, compaction. Release DB
-    # connection before the LLM call so we don't pin pool slots or hold
-    # idle-in-transaction across network I/O.
+    # Scope 1a: command check, load conversation, collect history ids (if
+    # compaction needed). Release DB connection before any LLM call so we
+    # don't pin pool slots or hold idle-in-transaction across network I/O.
     async with _db.async_session_factory() as db:
         if await handle_command(db, msg, matrix):
             return
 
         session, user_msg, messages = await load_conversation(db, msg, sys_prompt)
         session_id: int = session.id
-        session_room_id: str = session.room_id
         user_msg_id: int = user_msg.id
 
         from aineko.context import estimate_tokens
@@ -158,30 +157,33 @@ async def handle_message(
             },
         )
 
-        # Compact if conversation is getting long
-        if should_compact(messages, max_context_tokens):
-            logger.info("conversation approaching context limit, compacting")
+        needs_compaction: bool = should_compact(messages, max_context_tokens)
+        history_ids: list[int] = []
+        if needs_compaction:
             from sqlalchemy import select
 
             result = await db.execute(
-                select(Message)
+                select(Message.id)
                 .where(Message.session_id == session_id)
                 .order_by(Message.created_at)
             )
-            history: list[Message] = list(result.scalars().all())
+            history_ids = list(result.scalars().all())
 
-            # Ingest messages about to be compacted into long-term memory
-            ingest_before_compaction(
-                messages, session_id, session_room_id, compaction_keep_recent
-            )
-
-            messages, summary_text = await compact_messages(
-                messages,
-                kimi,
-                keep_recent=compaction_keep_recent,
-            )
-            if summary_text:
-                if old_msg_ids := [m.id for m in history[:-compaction_keep_recent]]:
+    # Compaction LLM calls run with no DB handle held.
+    if needs_compaction:
+        logger.info("conversation approaching context limit, compacting")
+        ingest_before_compaction(
+            messages, session_id, msg.room_id, compaction_keep_recent
+        )
+        messages, summary_text = await compact_messages(
+            messages,
+            kimi,
+            keep_recent=compaction_keep_recent,
+        )
+        if summary_text:
+            # Scope 1b: delete old messages, add summary. Short-lived.
+            async with _db.async_session_factory() as db:
+                if old_msg_ids := history_ids[:-compaction_keep_recent]:
                     await db.execute(
                         sa_delete(Message).where(Message.id.in_(old_msg_ids))
                     )
@@ -192,7 +194,7 @@ async def handle_message(
                         content=summary_text,
                     )
                 )
-            await db.commit()
+                await db.commit()
 
     messages = trim_messages(messages, max_context_tokens)
 

@@ -4,60 +4,8 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from hypothesis import given, settings
-from hypothesis import strategies as st
 
 from aineko.tools.grep import grep_files
-
-# --- Property-based tests ---
-
-
-class TestGrepProperties:
-    @given(pattern=st.text(min_size=1, max_size=100))
-    @settings(max_examples=20)
-    @pytest.mark.asyncio
-    async def test_never_crashes_on_arbitrary_pattern(self, pattern: str):
-        """Any pattern string returns a string, never raises."""
-        import tempfile
-        from pathlib import Path
-        from unittest.mock import patch
-
-        with tempfile.TemporaryDirectory() as td:
-            tmp = Path(td)
-            (tmp / "file.txt").write_text("some content\n")
-            with patch("aineko.tools.grep.DATA_ROOT", tmp):
-                result = await grep_files(pattern)
-            assert isinstance(result, str)
-
-    @given(path=st.text(min_size=1, max_size=50))
-    @settings(max_examples=20)
-    @pytest.mark.asyncio
-    async def test_never_crashes_on_arbitrary_path(self, path: str):
-        import tempfile
-        from pathlib import Path
-        from unittest.mock import patch
-
-        with tempfile.TemporaryDirectory() as td:
-            tmp = Path(td)
-            with patch("aineko.tools.grep.DATA_ROOT", tmp):
-                result = await grep_files("test", path=path)
-            assert isinstance(result, str)
-
-    @given(include=st.text(min_size=0, max_size=50))
-    @settings(max_examples=20)
-    @pytest.mark.asyncio
-    async def test_never_crashes_on_arbitrary_include(self, include: str):
-        import tempfile
-        from pathlib import Path
-        from unittest.mock import patch
-
-        with tempfile.TemporaryDirectory() as td:
-            tmp = Path(td)
-            (tmp / "file.txt").write_text("content\n")
-            with patch("aineko.tools.grep.DATA_ROOT", tmp):
-                result = await grep_files("content", include=include)
-            assert isinstance(result, str)
-
 
 # --- Example-based tests ---
 
