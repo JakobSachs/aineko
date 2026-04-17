@@ -30,9 +30,22 @@ class CronScheduler:
         jobs = result.scalars().all()
 
         for job in jobs:
-            self._add_job(job)
+            self.add_job(job)
 
         logger.info("Scheduled %d cron jobs", len(jobs))
+
+    def add_job(self, job: CronJob) -> None:
+        """Schedule a job (or replace its existing schedule)."""
+        self._add_job(job)
+
+    def remove_job(self, job_id: int) -> None:
+        """Remove a job from the scheduler. No-op if not scheduled."""
+        from apscheduler.jobstores.base import JobLookupError
+
+        try:
+            self._scheduler.remove_job(str(job_id))
+        except JobLookupError:
+            pass
 
     def _add_job(self, job: CronJob) -> None:
         trigger_kwargs: dict[str, Any] = {}

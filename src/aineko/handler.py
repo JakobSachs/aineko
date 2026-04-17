@@ -20,6 +20,7 @@ from aineko.tools.subagent import make_subagent_tool
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from aineko.cron.scheduler import CronScheduler
     from aineko.kimi.client import ChatResponse, KimiClient, ToolCallRecord
     from aineko.matrix.client import MatrixConnector
     from aineko.schemas.message import IncomingMessage
@@ -94,6 +95,7 @@ def build_request_tools(
     sent_messages: list[str],
     bg_tasks: BackgroundTaskManager | None = None,
     kimi: KimiClient | None = None,
+    cron: CronScheduler | None = None,
 ) -> ToolRegistry:
     """Clone base tools and add per-request messaging tools."""
     registry = ToolRegistry()
@@ -108,6 +110,12 @@ def build_request_tools(
 
     if kimi is not None:
         registry.register(make_subagent_tool(kimi, base_tools))
+
+    if cron is not None:
+        from aineko.tools.cron import make_cron_tools
+
+        for tool_def in make_cron_tools(cron, room_id):
+            registry.register(tool_def)
 
     return registry
 
@@ -129,7 +137,8 @@ async def load_conversation(
     # Save incoming message
     user_msg: Message = Message(session_id=session.id, role=Role.USER, content=msg.body)
     db.add(user_msg)
-    await db.flush()
+    await db.commit()
+    await db.refresh(user_msg)
 
     # Load history
     result = await db.execute(

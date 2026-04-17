@@ -120,6 +120,7 @@ async def handle_message(
     max_context_tokens: int,
     bg_tasks: BackgroundTaskManager | None = None,
     compaction_keep_recent: int = 4,
+    cron: CronScheduler | None = None,
 ) -> None:
     """Core message handler: load session, run agent, send reply."""
     from sqlalchemy import delete as sa_delete
@@ -132,7 +133,7 @@ async def handle_message(
 
         sent_messages: list[str] = []
         request_tools: ToolRegistry = build_request_tools(
-            tools, matrix, msg.room_id, sent_messages, bg_tasks, kimi
+            tools, matrix, msg.room_id, sent_messages, bg_tasks, kimi, cron
         )
 
         sys_prompt: str = build_system_prompt(skills, soul_path, memory_dir)
@@ -259,6 +260,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     matrix: MatrixConnector = MatrixConnector(
         settings.matrix, store_path=settings.data_dir / "crypto_store"
     )
+
+    # Cron (constructed before handler registration so tools can see it)
+    cron: CronScheduler = CronScheduler()
+
     matrix.on_message(
         lambda msg: handle_message(
             msg,
@@ -271,11 +276,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             max_ctx,
             bg_task_mgr,
             compaction_keep_recent=keep_recent,
+            cron=cron,
         )
     )
-
-    # Cron
-    cron: CronScheduler = CronScheduler()
 
     # Heartbeat
     heartbeat: HeartbeatRunner = HeartbeatRunner(

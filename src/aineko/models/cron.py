@@ -33,7 +33,6 @@ class CronJob(Base):
     delivery_room: Mapped[str] = mapped_column(String)
     delete_after_run: Mapped[bool] = mapped_column(Boolean, default=False)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
-    next_run: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     runs: Mapped[list["CronRun"]] = relationship(

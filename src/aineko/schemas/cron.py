@@ -28,7 +28,6 @@ class CronJobSchema(BaseModel):
     delivery_room: str
     delete_after_run: bool
     consecutive_failures: int
-    next_run: datetime | None
     created_at: datetime
 
 
