@@ -169,7 +169,11 @@ async def handle_message(
             )
             history_ids = list(result.scalars().all())
 
-    # Compaction LLM calls run with no DB handle held.
+    # Compaction LLM calls run with no DB handle held. Writes are deferred
+    # to scope 2 so that compaction state (deleted history + summary row)
+    # commits atomically with the assistant response. If the main LLM call
+    # below fails, compaction is discarded too, preserving retry consistency.
+    summary_text: str | None = None
     if needs_compaction:
         logger.info("conversation approaching context limit, compacting")
         ingest_before_compaction(
@@ -180,21 +184,6 @@ async def handle_message(
             kimi,
             keep_recent=compaction_keep_recent,
         )
-        if summary_text:
-            # Scope 1b: delete old messages, add summary. Short-lived.
-            async with _db.async_session_factory() as db:
-                if old_msg_ids := history_ids[:-compaction_keep_recent]:
-                    await db.execute(
-                        sa_delete(Message).where(Message.id.in_(old_msg_ids))
-                    )
-                db.add(
-                    Message(
-                        session_id=session_id,
-                        role=Role.SYSTEM,
-                        content=summary_text,
-                    )
-                )
-                await db.commit()
 
     messages = trim_messages(messages, max_context_tokens)
 
@@ -203,7 +192,8 @@ async def handle_message(
             await matrix.send_message(msg.room_id, text)
             sent_messages.append(text)
 
-    # LLM call runs with no DB connection held.
+    # Main LLM call — no DB connection held. If it raises, scope 2 is
+    # skipped and no compaction writes happen.
     response: ChatResponse = await kimi.chat_loop(
         messages, request_tools, on_intermediate=on_intermediate
     )
@@ -212,8 +202,19 @@ async def handle_message(
         footer: str = format_tool_footer(response.tool_history)
         await matrix.send_message(msg.room_id, response.content + footer)
 
-    # Scope 2: persist assistant response and tool logs.
+    # Scope 2: compaction writes + assistant response + tool logs in one
+    # transaction. persist_response commits at the end.
     async with _db.async_session_factory() as db:
+        if summary_text:
+            if old_msg_ids := history_ids[:-compaction_keep_recent]:
+                await db.execute(sa_delete(Message).where(Message.id.in_(old_msg_ids)))
+            db.add(
+                Message(
+                    session_id=session_id,
+                    role=Role.SYSTEM,
+                    content=summary_text,
+                )
+            )
         await persist_response(db, session_id, user_msg_id, response, sent_messages)
 
 
