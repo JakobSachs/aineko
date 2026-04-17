@@ -17,6 +17,14 @@ data/
 
 # External projects
 openclaw/
+opencode/
+
+# Tooling caches
+.claude/
+.hypothesis/
+
+# Local DB
+aineko.db
 
 # Coverage
 .coverage
