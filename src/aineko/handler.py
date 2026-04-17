@@ -202,8 +202,8 @@ async def load_conversation(
 
 async def persist_response(
     db: AsyncSession,
-    session: Session,
-    user_msg: Message,
+    session_id: int,
+    user_msg_id: int,
     response: ChatResponse,
     sent_messages: list[str],
 ) -> None:
@@ -227,7 +227,7 @@ async def persist_response(
 
         db.add(
             Message(
-                session_id=session.id,
+                session_id=session_id,
                 role=Role.ASSISTANT,
                 content=json.dumps(assistant_blocks),
                 token_count=response.usage.get("total_tokens"),
@@ -247,7 +247,7 @@ async def persist_response(
             )
         db.add(
             Message(
-                session_id=session.id,
+                session_id=session_id,
                 role=Role.TOOL,
                 content=json.dumps(result_blocks),
                 tool_name="__tool_results__",
@@ -262,7 +262,7 @@ async def persist_response(
         if visible:
             db.add(
                 Message(
-                    session_id=session.id,
+                    session_id=session_id,
                     role=Role.ASSISTANT,
                     content=visible,
                     token_count=response.usage.get("total_tokens"),
@@ -273,8 +273,8 @@ async def persist_response(
     for rec in response.tool_history:
         db.add(
             ToolLog(
-                session_id=session.id,
-                message_id=user_msg.id,
+                session_id=session_id,
+                message_id=user_msg_id,
                 tool_name=rec.tool_name,
                 arguments=rec.arguments,
                 result=rec.result,
