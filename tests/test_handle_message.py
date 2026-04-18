@@ -51,23 +51,16 @@ def skills():
 
 
 @pytest.fixture
-def soul_path(tmp_path):
-    p = tmp_path / "soul.md"
-    p.write_text("You are aineko.")
-    return p
-
-
-@pytest.fixture
-def memory_dir(tmp_path):
-    d = tmp_path / "memory"
-    d.mkdir()
-    return d
+def data_dir(tmp_path):
+    (tmp_path / "SOUL.md").write_text("You are aineko.")
+    (tmp_path / "memory").mkdir()
+    return tmp_path
 
 
 class TestHandleMessageIntegration:
     @pytest.mark.asyncio
     async def test_basic_message_flow(
-        self, setup_db, msg, kimi, matrix, skills, soul_path, memory_dir
+        self, setup_db, msg, kimi, matrix, skills, data_dir
     ):
         """handle_message runs end-to-end without errors."""
         tools = ToolRegistry()
@@ -78,8 +71,7 @@ class TestHandleMessageIntegration:
             tools,
             skills,
             matrix,
-            soul_path,
-            memory_dir,
+            data_dir,
             max_context_tokens=100_000,
         )
 
@@ -87,9 +79,7 @@ class TestHandleMessageIntegration:
         matrix.send_message.assert_awaited_once_with("!room:test", "hi there")
 
     @pytest.mark.asyncio
-    async def test_reset_command(
-        self, setup_db, kimi, matrix, skills, soul_path, memory_dir
-    ):
+    async def test_reset_command(self, setup_db, kimi, matrix, skills, data_dir):
         """The /reset command clears conversation and replies."""
         tools = ToolRegistry()
         reset_msg = IncomingMessage(
@@ -106,8 +96,7 @@ class TestHandleMessageIntegration:
             tools,
             skills,
             matrix,
-            soul_path,
-            memory_dir,
+            data_dir,
             max_context_tokens=100_000,
         )
 
@@ -117,7 +106,7 @@ class TestHandleMessageIntegration:
 
     @pytest.mark.asyncio
     async def test_response_persisted_across_calls(
-        self, setup_db, msg, kimi, matrix, skills, soul_path, memory_dir
+        self, setup_db, msg, kimi, matrix, skills, data_dir
     ):
         """Second call includes history from the first."""
         tools = ToolRegistry()
@@ -128,8 +117,7 @@ class TestHandleMessageIntegration:
             tools,
             skills,
             matrix,
-            soul_path,
-            memory_dir,
+            data_dir,
             max_context_tokens=100_000,
         )
 
@@ -147,8 +135,7 @@ class TestHandleMessageIntegration:
             tools,
             skills,
             matrix,
-            soul_path,
-            memory_dir,
+            data_dir,
             max_context_tokens=100_000,
         )
 

@@ -8,6 +8,11 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from aineko.bootstrap import (
+    SessionType,
+    load_bootstrap_files,
+    render_bootstrap_section,
+)
 from aineko.compaction import compact_messages, run_memory_flush, should_compact
 from aineko.config import Settings
 from aineko.context import trim_messages
@@ -78,45 +83,30 @@ def build_tools() -> ToolRegistry:
     return registry
 
 
-_DEFAULT_SOUL = (
-    "You are aineko, a personal AI assistant.\n\n"
-    "You can execute bash commands, read/write files, and search the web.\n"
-    "You run inside a container; /data is your persistent storage.\n\n"
-    "## Tools\n\n"
-    "Call tools when you need to take action. "
-    "Prefer concrete answers over asking the user to do things themselves.\n"
-)
+_IDENTITY_LINE = "You are aineko, a personal AI assistant."
 
 
-def build_system_prompt(skills: SkillsEngine, soul_path: Path, memory_dir: Path) -> str:
-    # Load soul from file, create default if missing
-    if soul_path.exists():
-        soul = soul_path.read_text()
-    else:
-        soul = _DEFAULT_SOUL
-        soul_path.write_text(soul)
+def build_system_prompt(
+    skills: SkillsEngine,
+    data_dir: Path,
+    session_type: SessionType = "main",
+) -> str:
+    """Assemble the system prompt from bootstrap files + runtime sections.
+
+    Order: identity → SOUL → AGENTS → TOOLS → USER → HEARTBEAT → MEMORY
+    (each bootstrap file rendered as `## {name}`) → skills.
+    """
+    sections: list[str] = [_IDENTITY_LINE]
+
+    for bf in load_bootstrap_files(data_dir, session_type=session_type):
+        sections.append(render_bootstrap_section(bf))
 
     summaries = skills.summaries()
     if summaries:
         lines = [f"- **{s['name']}**: {s['description']}" for s in summaries]
-        soul += "\n\n## Available Skills\n" + "\n".join(lines)
+        sections.append("## Available Skills\n" + "\n".join(lines))
 
-    # Inject curated long-term memory index if present
-    memory_index = memory_dir / "memory.md"
-    if memory_index.exists():
-        soul += "\n\n---\n\n" + memory_index.read_text()
-
-    soul += (
-        "\n\n## Memory Recall\n"
-        "Durable memories live in `memory/YYYY-MM-DD.md` under the data dir. "
-        "Use the `memory` tool with action=search to substring-search across "
-        "all daily logs, then action=read with a specific path+from_line to "
-        "pull only the lines you need. When citing, include "
-        "`Source: <path>#<line>`. Append new durable facts with action=store "
-        "— the tool always appends to today's log.\n"
-    )
-
-    return soul
+    return "\n\n".join(sections)
 
 
 async def handle_message(
@@ -125,8 +115,7 @@ async def handle_message(
     tools: ToolRegistry,
     skills: SkillsEngine,
     matrix: MatrixConnector,
-    soul_path: Path,
-    memory_dir: Path,
+    data_dir: Path,
     max_context_tokens: int,
     bg_tasks: BackgroundTaskManager | None = None,
     compaction_keep_recent: int = 4,
@@ -141,7 +130,7 @@ async def handle_message(
     request_tools: ToolRegistry = build_request_tools(
         tools, matrix, msg.room_id, sent_messages, bg_tasks, kimi, cron
     )
-    sys_prompt: str = build_system_prompt(skills, soul_path, memory_dir)
+    sys_prompt: str = build_system_prompt(skills, data_dir)
 
     # Scope 1a: command check, load conversation, collect history ids (if
     # compaction needed). Release DB connection before any LLM call so we
@@ -251,8 +240,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Kimi
     kimi: KimiClient = KimiClient(settings.kimi)
 
-    # Soul + Memory
-    soul_path: Path = settings.data_dir / "soul.md"
+    # Memory dir (daily logs)
     memory_dir: Path = settings.data_dir / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
     init_memory_dir(memory_dir)
@@ -293,8 +281,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             tools,
             skills,
             matrix,
-            soul_path,
-            memory_dir,
+            settings.data_dir,
             max_ctx,
             bg_task_mgr,
             compaction_keep_recent=keep_recent,
@@ -307,8 +294,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         settings.heartbeat, settings.heartbeat_file
     )
 
-    # Wire cron runner
-    sys_prompt: str = build_system_prompt(skills, soul_path, memory_dir)
+    # Wire cron runner (cron uses its own prompt mode later; for now, main)
+    sys_prompt: str = build_system_prompt(
+        skills, settings.data_dir, session_type="cron"
+    )
     cron.set_runner(
         lambda job: run_cron_job(job, kimi, tools, skills, matrix, sys_prompt)
     )
