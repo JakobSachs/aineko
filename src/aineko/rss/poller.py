@@ -7,8 +7,10 @@ import logging
 from typing import TYPE_CHECKING
 
 import feedparser
-from sqlalchemy import select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from datetime import datetime, timedelta
+
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 import aineko.db as _db
 from aineko.models.rss import RssSeenItem
@@ -85,7 +87,11 @@ async def _mark_seen_bulk(
     if not rows:
         return
     async with _db.async_session_factory() as db:
-        stmt = sqlite_insert(RssSeenItem).values(rows).on_conflict_do_nothing()
+        stmt = (
+            pg_insert(RssSeenItem)
+            .values(rows)
+            .on_conflict_do_nothing(index_elements=["feed_url", "guid"])
+        )
         await db.execute(stmt)
         await db.commit()
 
@@ -120,6 +126,27 @@ async def _check_feed(
             sender="rss",
             suppress_text_response=True,
         )
+
+
+_CLEANUP_INTERVAL_SECONDS = 24 * 3600
+_CLEANUP_AGE_DAYS = 90
+
+
+async def rss_cleanup_loop() -> None:
+    """Periodically delete rss_seen_items rows older than 90 days."""
+    assert _db.async_session_factory is not None
+    while True:
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=_CLEANUP_AGE_DAYS)
+            async with _db.async_session_factory() as db:
+                result = await db.execute(
+                    delete(RssSeenItem).where(RssSeenItem.seen_at < cutoff)
+                )
+                await db.commit()
+                logger.info("RSS cleanup: deleted %d old rows", result.rowcount or 0)
+        except Exception:
+            logger.exception("RSS cleanup failed")
+        await asyncio.sleep(_CLEANUP_INTERVAL_SECONDS)
 
 
 async def rss_poll_loop(

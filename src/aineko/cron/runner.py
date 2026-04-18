@@ -42,7 +42,7 @@ async def run_cron_job(
 
             run.status = RunStatus.SUCCESS
             run.output = response.content
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
             # Reset failure counter on success
             result = await db.execute(select(CronJob).where(CronJob.id == job.id))
@@ -64,7 +64,7 @@ async def run_cron_job(
             logger.exception("Cron job %s failed", job.name)
             run.status = RunStatus.FAILURE
             run.error = str(e)
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
             result = await db.execute(select(CronJob).where(CronJob.id == job.id))
             db_job = result.scalar_one()

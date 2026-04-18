@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     def db_url(self) -> str:
         if self.database_url:
             return self.database_url
-        return f"sqlite+aiosqlite:///{self.data_dir / 'aineko.db'}"
+        return "postgresql+asyncpg://aineko:aineko@postgres:5432/aineko"
 
     @property
     def skills_dir(self) -> Path:

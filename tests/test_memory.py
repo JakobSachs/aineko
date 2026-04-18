@@ -4,13 +4,10 @@ import pytest
 import pytest_asyncio
 from hypothesis import given, settings as hsettings, HealthCheck
 from hypothesis import strategies as st
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from unittest.mock import patch
 
-from aineko.db import Base
 from aineko.tools.memory import _memory
 import aineko.tools.memory as memory_mod
-import aineko.db as db_mod
 
 # --- strategies ---
 
@@ -41,18 +38,8 @@ entity_text = st.text(
 
 
 @pytest_asyncio.fixture
-async def setup_db(tmp_path):
-    """Initialize test database for KG operations."""
-    url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-    engine = create_async_engine(url, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    original = db_mod.async_session_factory
-    db_mod.async_session_factory = factory
+async def setup_db(pg_db):
     yield
-    db_mod.async_session_factory = original
-    await engine.dispose()
 
 
 @pytest.fixture(autouse=True)

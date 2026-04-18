@@ -7,19 +7,15 @@ import pytest_asyncio
 from sqlalchemy import select
 
 from aineko.cron.runner import run_cron_job
-from aineko.db import init_engine, create_tables, dispose_engine, get_session
+from aineko.db import get_session
 from aineko.kimi.client import ChatResponse
 from aineko.models.cron import CronJob, CronRun, RunStatus, ScheduleKind
 from aineko.tools.registry import ToolRegistry
 
 
 @pytest_asyncio.fixture
-async def setup_db(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_engine(f"sqlite+aiosqlite:///{db_path}")
-    await create_tables()
+async def setup_db(pg_db):
     yield
-    await dispose_engine()
 
 
 @pytest_asyncio.fixture

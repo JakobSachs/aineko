@@ -27,7 +27,7 @@ from aineko.handler import (
     persist_response,
 )
 from aineko.heartbeat.loop import heartbeat_tick_loop
-from aineko.rss.poller import rss_poll_loop
+from aineko.rss.poller import rss_cleanup_loop, rss_poll_loop
 from aineko.heartbeat.runner import HeartbeatRunner
 from aineko.kimi.client import ChatResponse, KimiClient
 from aineko.matrix.client import MatrixConnector
@@ -369,6 +369,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             logger.info(
                 "RSS poller started: %d feed(s), room=%s", len(rss_feeds), rss_room
             )
+
+        bg_tasks.append(asyncio.create_task(rss_cleanup_loop(), name="rss-cleanup"))
 
     logger.info("aineko started")
 

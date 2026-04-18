@@ -1,6 +1,7 @@
-"""Alembic env.py — async-aware for SQLAlchemy + aiosqlite."""
+"""Alembic env.py — async-aware, reads URL from AINEKO_DATABASE_URL."""
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -8,26 +9,29 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
-# Import Base and all models so autogenerate can detect them
+# Import Base and all models so autogenerate sees every table
+from aineko.config import Settings
 from aineko.db import Base
 from aineko.models import cron, message  # noqa: F401
+from aineko.models import rss  # noqa: F401
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+url = os.environ.get("AINEKO_DATABASE_URL") or Settings().db_url
+config.set_main_option("sqlalchemy.url", url)
+
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=config.get_main_option("sqlalchemy.url"),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        render_as_batch=True,  # required for SQLite ALTER TABLE
     )
 
     with context.begin_transaction():
@@ -35,11 +39,7 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection):  # type: ignore[no-untyped-def]
-    context.configure(
-        connection=connection,
-        target_metadata=target_metadata,
-        render_as_batch=True,
-    )
+    context.configure(connection=connection, target_metadata=target_metadata)
 
     with context.begin_transaction():
         context.run_migrations()

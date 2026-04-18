@@ -7,19 +7,14 @@ import pytest
 import pytest_asyncio
 
 from aineko.app import handle_message
-from aineko.db import init_engine, create_tables, dispose_engine
 from aineko.kimi.client import ChatResponse
 from aineko.schemas.message import IncomingMessage
 from aineko.tools.registry import ToolRegistry
 
 
 @pytest_asyncio.fixture
-async def setup_db(tmp_path):
-    """Initialize a real in-memory DB so async_session_factory is set."""
-    init_engine("sqlite+aiosqlite:///:memory:")
-    await create_tables()
+async def setup_db(pg_db):
     yield
-    await dispose_engine()
 
 
 @pytest.fixture
