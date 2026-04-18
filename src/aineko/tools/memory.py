@@ -72,6 +72,11 @@ async def _memory(
             return "Error: 'path' is required for read."
         target = Path(path)
         if not target.is_absolute():
+            # Strip a leading "memory/" component so both "2026-04-18.md" and
+            # "memory/2026-04-18.md" resolve correctly under _memory_dir.
+            parts = target.parts
+            if parts and parts[0] == _memory_dir.name:
+                target = Path(*parts[1:])
             target = _memory_dir / target
         lim = lines if lines > 0 else None
         text = read_log(target, from_line=from_line, lines=lim)
