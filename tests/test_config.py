@@ -31,12 +31,12 @@ def test_kimi_defaults():
 
 def test_settings_db_url_default():
     s = Settings()
-    assert "aineko.db" in s.db_url
+    assert s.db_url.startswith("postgresql+asyncpg://")
 
 
 def test_settings_db_url_override():
-    s = Settings(database_url="sqlite:///custom.db")
-    assert s.db_url == "sqlite:///custom.db"
+    s = Settings(database_url="postgresql+asyncpg://u:p@h:5432/custom")
+    assert s.db_url == "postgresql+asyncpg://u:p@h:5432/custom"
 
 
 def test_settings_skills_dir():

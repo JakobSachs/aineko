@@ -1,7 +1,27 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aineko}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aineko}
+      POSTGRES_DB: ${POSTGRES_DB:-aineko}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aineko}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   aineko:
     build: .
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - ./data:/data
       - ~/Obsidian:/data/vault:ro
@@ -23,3 +43,4 @@ services:
 
 volumes:
   chroma-cache:
+  postgres-data:

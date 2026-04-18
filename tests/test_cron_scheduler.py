@@ -8,7 +8,7 @@ from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from aineko.cron.scheduler import CronScheduler, _parse_interval
-from aineko.db import init_engine, create_tables, dispose_engine, get_session
+from aineko.db import get_session
 from aineko.models.cron import CronJob, ScheduleKind
 
 # --- Property-based tests ---
@@ -86,12 +86,8 @@ class TestParseInterval:
 
 
 @pytest_asyncio.fixture
-async def setup_db(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_engine(f"sqlite+aiosqlite:///{db_path}")
-    await create_tables()
+async def setup_db(pg_db):
     yield
-    await dispose_engine()
 
 
 class TestCronScheduler:
