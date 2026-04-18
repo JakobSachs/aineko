@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any
 
 from aineko.context import estimate_tokens
@@ -58,63 +59,70 @@ def _clean_content(raw: str) -> str:
     return cleaned.strip()
 
 
-def ingest_before_compaction(
-    messages: list[dict[str, Any]],
-    session_id: int,
-    room_id: str,
-    keep_recent: int = 4,
-) -> None:
-    """Store messages about to be compacted into ChromaDB long-term memory.
+SILENT_REPLY_TOKEN = "[SILENT_REPLY_TOKEN]"
 
-    Called right before compact_messages(). Only ingests the old messages
-    that will be replaced by the summary. The MemoryStore's built-in dedup
-    (0.95 cosine threshold) prevents storing content that's already in memory.
+MEMORY_FLUSH_SYSTEM_PROMPT = """\
+Pre-compaction memory flush turn.
+The session is near auto-compaction; capture durable memories to disk.
+Store durable memories only in memory/YYYY-MM-DD.md via the memory tool's
+store action (it will append; never overwrite).
+Treat workspace bootstrap/reference files such as MEMORY.md, SOUL.md, and
+AGENTS.md as read-only during this flush; never overwrite, replace, or edit them.
+You may reply, but usually [SILENT_REPLY_TOKEN] is correct.
+"""
+
+
+def _memory_flush_user_prompt() -> str:
+    return (
+        "Pre-compaction memory flush.\n"
+        "Store durable memories only in memory/YYYY-MM-DD.md via the memory "
+        "tool's store action (create the file by appending if it does not exist).\n"
+        "Treat workspace bootstrap/reference files such as MEMORY.md, SOUL.md, "
+        "and AGENTS.md as read-only during this flush; never overwrite, replace, "
+        "or edit them.\n"
+        "If today's log already exists, APPEND new content only; do not "
+        "overwrite existing entries.\n"
+        "Do NOT create timestamped variant files (e.g., YYYY-MM-DD-HHMM.md); "
+        "always use the canonical YYYY-MM-DD.md filename.\n"
+        f"If nothing to store, reply with {SILENT_REPLY_TOKEN}.\n"
+        f"Current time: {datetime.now().isoformat(timespec='seconds')}\n"
+    )
+
+
+async def run_memory_flush(
+    messages: list[dict[str, Any]],
+    kimi_client: Any,
+    tools: Any,
+) -> None:
+    """Run a dedicated memory-flush turn right before compaction.
+
+    Replays the pre-compaction transcript with a system prompt instructing
+    the model to persist durable memories via the memory tool. Output is
+    discarded — only side effects (memory tool calls) matter.
     """
-    from aineko.memory.store import MemoryStore
+    if not messages:
+        return
 
     conversation = (
-        messages[1:] if messages and messages[0].get("role") == "system" else messages
+        messages[1:] if messages[0].get("role") == "system" else list(messages)
     )
-    if len(conversation) <= keep_recent:
+    if not conversation:
         return
 
-    old_messages = conversation[:-keep_recent]
+    flush_messages: list[dict[str, Any]] = [
+        {"role": "system", "content": MEMORY_FLUSH_SYSTEM_PROMPT},
+        *conversation,
+        {"role": "user", "content": _memory_flush_user_prompt()},
+    ]
 
-    # Build exchange pairs from old messages
-    exchanges: list[str] = []
-    pending_user: str | None = None
-    for m in old_messages:
-        role = m.get("role", "")
-        content = m.get("content", "") or ""
-        if isinstance(content, list):
-            content = " ".join(
-                p.get("text", "")
-                for p in content
-                if isinstance(p, dict) and p.get("type") == "text"
-            )
-        if role == "user":
-            pending_user = content
-        elif role == "assistant" and pending_user is not None:
-            text = _clean_content(content)
-            if text:
-                exchanges.append(f"> {pending_user}\n{text}")
-            pending_user = None
-
-    if not exchanges:
-        return
-
+    logger.info(
+        "running memory flush turn before compaction",
+        extra={"event": "memory_flush_start", "msg_count": len(conversation)},
+    )
     try:
-        store = MemoryStore(persist_dir="/data/memory/chromadb")
-        text = "\n\n---\n\n".join(exchanges)
-        tags = {"type": "conversation", "session": str(session_id), "room": room_id}
-        ids = store.add(text, source=f"conversation:{session_id}", tags=tags)
-        if ids:
-            logger.info(
-                "ingested messages into long-term memory before compaction",
-                extra={"chunks_stored": len(ids), "session_id": session_id},
-            )
+        await kimi_client.chat_loop(flush_messages, tools)
     except Exception:
-        logger.exception("failed to ingest messages before compaction")
+        logger.exception("memory flush turn failed; continuing with compaction")
 
 
 def should_compact(messages: list[dict[str, Any]], max_tokens: int) -> bool:
