@@ -165,7 +165,7 @@ async def handle_message(
             result = await db.execute(
                 select(Message.id)
                 .where(Message.session_id == session_id)
-                .order_by(Message.created_at)
+                .order_by(Message.created_at, Message.id)
             )
             history_ids = list(result.scalars().all())
 

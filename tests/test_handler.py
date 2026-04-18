@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import event as sa_event, select
 
 from aineko.models.message import Message, Role, Session, ToolLog
 from aineko.schemas.message import IncomingMessage
@@ -349,6 +349,96 @@ class TestLoadConversation:
         assert messages[1]["content"] == blocks
         assert messages[2]["role"] == "user"
         assert messages[2]["content"] == result_blocks
+
+    @pytest.mark.asyncio
+    async def test_history_ordering_is_deterministic_under_ties(self, db, msg):
+        """Regression: messages with identical created_at must come out in
+        insertion order so tool_use stays paired before tool_result.
+        SQLite tie-broke by rowid; PG returns ties arbitrarily unless the
+        ORDER BY also names id as a secondary key.
+
+        Structural check — asserts the query as executed by load_conversation
+        includes an id tie-breaker. The behavioural alternative (insert ties
+        and observe order) is flaky: for small row counts PG happens to
+        return insert-order even without the tie-breaker.
+        """
+        import re
+
+        from aineko.handler import load_conversation
+
+        s = Session(room_id="!room:test")
+        db.add(s)
+        await db.flush()
+
+        tied = datetime(2026, 1, 1, 12, 0, 0)
+        db.add(
+            Message(
+                session_id=s.id,
+                role=Role.ASSISTANT,
+                content=json.dumps(
+                    [{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]
+                ),
+                tool_name="__has_tool_calls__",
+                created_at=tied,
+            )
+        )
+        await db.flush()
+        db.add(
+            Message(
+                session_id=s.id,
+                role=Role.TOOL,
+                content=json.dumps(
+                    [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]
+                ),
+                tool_name="__tool_results__",
+                created_at=tied,
+            )
+        )
+        await db.flush()
+
+        # Behavioural sanity check — in PG small queries this tends to pass
+        # even without the fix, but it's still worth keeping as a smoke test.
+        _, _, messages = await load_conversation(db, msg, system_prompt="sys")
+        use_idx = next(
+            i
+            for i, m in enumerate(messages)
+            if m["role"] == "assistant"
+            and isinstance(m["content"], list)
+            and any(b.get("type") == "tool_use" for b in m["content"])
+        )
+        res_idx = next(
+            i
+            for i, m in enumerate(messages)
+            if m["role"] == "user"
+            and isinstance(m["content"], list)
+            and any(b.get("type") == "tool_result" for b in m["content"])
+        )
+        assert use_idx < res_idx
+
+        # Structural guard — capture the actual SQL load_conversation emits
+        # and assert the ORDER BY includes id as a tie-breaker.
+        captured: list[str] = []
+        engine = db.bind
+        assert engine is not None
+
+        @sa_event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def _capture(
+            conn, cursor, statement, params, context, executemany
+        ):  # noqa: ANN001
+            if "FROM messages" in statement and "ORDER BY" in statement:
+                captured.append(statement)
+
+        try:
+            await load_conversation(db, msg, system_prompt="sys")
+        finally:
+            sa_event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+        history_sqls = [s for s in captured if "ORDER BY" in s]
+        assert history_sqls, "load_conversation did not issue an ordered history query"
+        order_by = re.split(r"\bORDER BY\b", history_sqls[-1], maxsplit=1)[1]
+        assert (
+            "messages.id" in order_by
+        ), f"ORDER BY must include messages.id as tie-breaker; got: {order_by.strip()}"
 
     @pytest.mark.asyncio
     async def test_image_attachment(self, db):

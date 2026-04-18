@@ -144,7 +144,7 @@ async def load_conversation(
     result = await db.execute(
         select(Message)
         .where(Message.session_id == session.id)
-        .order_by(Message.created_at)
+        .order_by(Message.created_at, Message.id)
     )
     history: list[Message] = list(result.scalars().all())
 
