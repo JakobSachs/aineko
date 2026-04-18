@@ -8,11 +8,10 @@ Usage:
         --out /data/memory \
         [--dry-run] [--reformat]
 
-Produces ``memory/YYYY-MM-DD.md`` files keyed by each group's earliest
-ingestion timestamp (fallback: today). Groups chunks by ``source`` in the
-ChromaDB metadata. When ``--reformat`` is passed, raw content is sent to
-Kimi for cleanup before being written; otherwise the raw chunks are
-dumped verbatim.
+Produces ``memory/YYYY-MM-DD.md`` files keyed by the SQLite insertion date
+of each chunk (from the internal chroma.sqlite3). Groups chunks by date, then
+by source within that date. When ``--reformat`` is passed, each (date, source)
+group is sent to Kimi for cleanup; otherwise raw chunks are written verbatim.
 
 This script runs once, manually. It is NOT part of the runtime.
 Leaves ChromaDB on disk untouched.
@@ -23,20 +22,37 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import sqlite3
 import sys
 from collections import defaultdict
-from datetime import datetime, date
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT / "src"))  # noqa: E402
 
-import chromadb
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+import chromadb  # noqa: E402
+from sqlalchemy import select  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 
-from aineko.memory.kg import Fact
+from aineko.memory.kg import Fact  # noqa: E402
 
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal .env loader — populate os.environ for any key not already set."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+_load_dotenv(_PROJECT_ROOT / ".env")
 
 REFORMAT_PROMPT = """\
 Reformat the following raw memory fragments into a clean, human-readable
@@ -50,9 +66,34 @@ Raw content:
 """
 
 
-def _group_chroma_by_source(
+def _read_chroma_with_dates(
     chromadb_dir: Path,
-) -> dict[str, list[tuple[str, dict[str, Any]]]]:
+) -> dict[date, dict[str, list[str]]]:
+    """Return {date: {source: [doc, ...]}} using SQLite insertion timestamps.
+
+    Falls back to today() if the sqlite file or created_at column is missing.
+    """
+    sqlite_path = chromadb_dir / "chroma.sqlite3"
+    id_to_date: dict[str, date] = {}
+
+    if sqlite_path.exists():
+        con = sqlite3.connect(sqlite_path)
+        try:
+            rows = con.execute(
+                "SELECT embedding_id, created_at FROM embeddings"
+            ).fetchall()
+            for eid, created_at in rows:
+                if created_at:
+                    try:
+                        d = datetime.fromisoformat(created_at).date()
+                    except ValueError:
+                        d = date.today()
+                else:
+                    d = date.today()
+                id_to_date[eid] = d
+        finally:
+            con.close()
+
     client = chromadb.PersistentClient(path=str(chromadb_dir))
     try:
         col = client.get_collection("memories")
@@ -61,25 +102,19 @@ def _group_chroma_by_source(
         return {}
 
     data = col.get(include=["documents", "metadatas"])
-    groups: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
-    for doc, meta in zip(data.get("documents") or [], data.get("metadatas") or []):
+    ids = data.get("ids") or []
+    docs = data.get("documents") or []
+    metas = data.get("metadatas") or []
+
+    # {date: {source: [doc]}}
+    grouped: dict[date, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for eid, doc, meta in zip(ids, docs, metas):
+        d = id_to_date.get(eid, date.today())
         src = (meta or {}).get("source", "unknown")
-        groups[src].append((doc, meta or {}))
-    return groups
+        if doc:
+            grouped[d][src].append(doc)
 
-
-def _date_for_source(src: str, entries: list[tuple[str, dict[str, Any]]]) -> date:
-    """Pick a date for the daily log file. Tries tags, then today."""
-    for _, meta in entries:
-        for key in ("date", "created_at", "timestamp"):
-            raw = meta.get(key)
-            if not raw:
-                continue
-            try:
-                return datetime.fromisoformat(str(raw)).date()
-            except ValueError:
-                continue
-    return date.today()
+    return grouped
 
 
 async def _reformat(raw: str, api_key: str, base_url: str, model: str) -> str:
@@ -155,8 +190,7 @@ async def migrate(
     dry_run: bool,
     reformat: bool,
 ) -> None:
-    groups = _group_chroma_by_source(chromadb_dir)
-    print(f"found {len(groups)} chromadb source group(s)", file=sys.stderr)
+    grouped = _read_chroma_with_dates(chromadb_dir)
 
     api_key = os.environ.get("KIMI_API_KEY", "")
     base_url = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
@@ -165,18 +199,26 @@ async def migrate(
         print("--reformat requires KIMI_API_KEY in env", file=sys.stderr)
         sys.exit(2)
 
-    for src, entries in groups.items():
-        d = _date_for_source(src, entries)
-        raw = "\n\n---\n\n".join(doc for doc, _ in entries if doc)
-        if not raw.strip():
-            continue
-        body = await _reformat(raw, api_key, base_url, model) if reformat else raw
-        header = f"Memory (migrated from chromadb: {src})"
-        if dry_run:
-            print(f"[chroma] {d} :: {src}: {len(entries)} chunk(s), {len(body)} chars")
-        else:
-            path = _write_entry(out_dir, d, header, body)
-            print(f"wrote {path} ← source={src} ({len(entries)} chunk(s))")
+    total_groups = sum(len(srcs) for srcs in grouped.values())
+    print(
+        f"found {len(grouped)} date(s), {total_groups} (date, source) group(s)",
+        file=sys.stderr,
+    )
+
+    for d in sorted(grouped.keys()):
+        for src, docs in grouped[d].items():
+            raw = "\n\n---\n\n".join(docs)
+            if not raw.strip():
+                continue
+            body = await _reformat(raw, api_key, base_url, model) if reformat else raw
+            header = f"Memory (migrated from chromadb: {src})"
+            if dry_run:
+                print(
+                    f"[chroma] {d} :: {src}: {len(docs)} chunk(s), {len(body)} chars"
+                )
+            else:
+                path = _write_entry(out_dir, d, header, body)
+                print(f"wrote {path} ← {d} source={src} ({len(docs)} chunk(s))")
 
     fact_count = await _dump_facts(db_url, out_dir, dry_run)
     print(f"facts migrated: {fact_count}", file=sys.stderr)
