@@ -1,30 +1,30 @@
-"""Memory tool — semantic search and storage + temporal knowledge graph.
+"""Memory tool — file-based daily logs + temporal knowledge graph.
 
-Replaces the old file-based memory with ChromaDB embeddings for search
-and a SQLite knowledge graph for structured facts.
+Durable memories are stored as append-only markdown in
+``<memory_dir>/YYYY-MM-DD.md``. Structured facts live in the Postgres
+knowledge-graph table.
 """
 
 import logging
+from pathlib import Path
 
 from aineko.db import get_session
+from aineko.memory.daily_log import append_to_today, read_log, search_logs
 from aineko.memory.kg import KnowledgeGraph
-from aineko.memory.store import MemoryStore
 from aineko.tools.registry import ToolDef
 
 logger = logging.getLogger(__name__)
 
-CHROMADB_DIR = "/data/memory/chromadb"
-
-# Module-level singletons — initialized on first use
-_store: MemoryStore | None = None
+# Default path used when app.py doesn't call init_memory_dir() (e.g. in tests
+# that patch the module-level var directly).
+_memory_dir: Path = Path("/data/memory")
 _kg = KnowledgeGraph()
 
 
-def _get_store() -> MemoryStore:
-    global _store
-    if _store is None:
-        _store = MemoryStore(persist_dir=CHROMADB_DIR)
-    return _store
+def init_memory_dir(path: Path) -> None:
+    """Configure where the memory tool reads/writes daily logs."""
+    global _memory_dir
+    _memory_dir = path
 
 
 async def _memory(
@@ -39,38 +39,45 @@ async def _memory(
     object: str = "",
     valid_from: str = "",
     as_of: str = "",
-    n_results: int = 5,
+    path: str = "",
+    from_line: int = 1,
+    lines: int = 0,
+    n_results: int = 20,
 ) -> str:
-    store = _get_store()
-
     if action == "search":
         if not query:
             return "Error: 'query' is required for search."
-        where = None
-        if tags:
-            where = dict(pair.split("=") for pair in tags.split(",") if "=" in pair)
-        results = store.search(query, n_results=n_results, where=where)
+        results = search_logs(_memory_dir, query, limit=n_results)
         if not results:
             return f"No memories matching '{query}'."
-        lines = []
+        out = []
         for r in results:
-            sim = f"{r.similarity:.0%}"
-            lines.append(f"[{sim}] (source: {r.source})")
-            lines.append(r.content)
-            lines.append("")
-        return "\n".join(lines)
+            out.append(f"{r.path}:{r.line}: {r.text}")
+        return "\n".join(out)
 
     elif action == "store":
         if not content:
             return "Error: 'content' is required for store."
-        tag_dict = None
+        prefix = ""
+        if source:
+            prefix = f"**source:** {source}  \n"
         if tags:
-            tag_dict = dict(pair.split("=") for pair in tags.split(",") if "=" in pair)
-        src = source or "agent"
-        ids = store.add(content, source=src, tags=tag_dict)
-        if not ids:
-            return "Content already exists in memory (duplicate)."
-        return f"Stored {len(ids)} chunk(s) under source '{src}'."
+            prefix += f"**tags:** {tags}  \n"
+        body = (prefix + "\n" + content.strip()) if prefix else content.strip()
+        file_path = append_to_today(_memory_dir, body)
+        return f"Appended to {file_path}."
+
+    elif action == "read":
+        if not path:
+            return "Error: 'path' is required for read."
+        target = Path(path)
+        if not target.is_absolute():
+            target = _memory_dir / target
+        lim = lines if lines > 0 else None
+        text = read_log(target, from_line=from_line, lines=lim)
+        if not text:
+            return f"No content at {target} (from_line={from_line})."
+        return f"{target} (from line {from_line}):\n{text}"
 
     elif action == "facts_query":
         if not entity:
@@ -79,14 +86,14 @@ async def _memory(
             results = await _kg.query(db, entity, as_of=as_of or None)
         if not results:
             return f"No facts about '{entity}'."
-        lines = []
+        out = []
         for f in results:
             line = f"{f['subject']} —{f['predicate']}→ {f['object']}"
             if f["valid_from"]:
                 line += f" (from {f['valid_from']}"
                 line += f" to {f['valid_to']})" if f["valid_to"] else ")"
-            lines.append(line)
-        return "\n".join(lines)
+            out.append(line)
+        return "\n".join(out)
 
     elif action == "facts_add":
         if not subject or not predicate or not object:
@@ -112,7 +119,7 @@ async def _memory(
                 subject,
                 predicate,
                 object,
-                ended=valid_from or None,  # reuse valid_from as end date
+                ended=valid_from or None,
             )
             await db.commit()
         if found:
@@ -126,18 +133,17 @@ async def _memory(
             results = await _kg.timeline(db, entity)
         if not results:
             return f"No facts about '{entity}'."
-        lines = []
+        out = []
         for f in results:
             date = f["valid_from"] or "?"
             end = f" → {f['valid_to']}" if f["valid_to"] else ""
-            lines.append(
-                f"[{date}{end}] {f['subject']} —{f['predicate']}→ {f['object']}"
-            )
-        return "\n".join(lines)
+            out.append(f"[{date}{end}] {f['subject']} —{f['predicate']}→ {f['object']}")
+        return "\n".join(out)
 
     else:
         actions = (
-            "search, store, facts_query, facts_add, facts_invalidate, facts_timeline"
+            "search, store, read, facts_query, facts_add, facts_invalidate, "
+            "facts_timeline"
         )
         return f"Unknown action '{action}'. Use: {actions}"
 
@@ -145,12 +151,16 @@ async def _memory(
 memory_tool = ToolDef(
     name="memory",
     description=(
-        "Mid/long-term memory — semantic search, storage, and a temporal knowledge graph.\n\n"
-        "Call search at the START of every conversation, before responding, using keywords "
-        "from what the user is asking about. A missed search costs trust; a wasted search costs nothing.\n\n"
-        "After any non-trivial conversation: store what you learned — preferences, decisions, "
-        "corrections, people, project context. Use facts_add for structured entity facts "
-        "(person X does Y), facts_invalidate when facts change."
+        "Mid/long-term memory — substring search across daily markdown logs, "
+        "append-only writes, and a temporal knowledge graph.\n\n"
+        "Call search at the START of every conversation, using keywords from "
+        "what the user is asking about. A missed search costs trust; a wasted "
+        "search costs nothing.\n\n"
+        "After any non-trivial conversation: store what you learned — "
+        "preferences, decisions, corrections, people, project context. "
+        "Writes append to memory/YYYY-MM-DD.md (never overwrite). "
+        "Use facts_add for structured entity facts (person X does Y), "
+        "facts_invalidate when facts change."
     ),
     parameters={
         "type": "object",
@@ -160,14 +170,16 @@ memory_tool = ToolDef(
                 "enum": [
                     "search",
                     "store",
+                    "read",
                     "facts_query",
                     "facts_add",
                     "facts_invalidate",
                     "facts_timeline",
                 ],
                 "description": (
-                    "search: semantic search over memories. "
-                    "store: save content to memory. "
+                    "search: substring search over daily memory logs. "
+                    "store: append content to today's memory log. "
+                    "read: targeted read of a memory log by path + line range. "
                     "facts_query: look up what you know about an entity. "
                     "facts_add: record a fact (subject-predicate-object). "
                     "facts_invalidate: mark a fact as no longer true. "
@@ -176,19 +188,31 @@ memory_tool = ToolDef(
             },
             "query": {
                 "type": "string",
-                "description": "Natural-language search query (for search).",
+                "description": "Substring to search for (for search).",
             },
             "content": {
                 "type": "string",
-                "description": "Text to store in memory (for store).",
+                "description": "Text to append to today's log (for store).",
             },
             "source": {
                 "type": "string",
-                "description": "Label for the memory source, e.g. 'user', 'conversation'. Default: 'agent'.",
+                "description": "Optional label for the memory source, e.g. 'user', 'conversation'.",
             },
             "tags": {
                 "type": "string",
-                "description": "Comma-separated key=value metadata, e.g. 'type=preference,topic=food'.",
+                "description": "Comma-separated key=value metadata, recorded in the entry.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Log file path for read action (absolute, or relative to memory dir).",
+            },
+            "from_line": {
+                "type": "integer",
+                "description": "1-indexed line to start reading from (for read). Default 1.",
+            },
+            "lines": {
+                "type": "integer",
+                "description": "Max lines to return (for read). 0 means read to end.",
             },
             "entity": {
                 "type": "string",
@@ -200,7 +224,7 @@ memory_tool = ToolDef(
             },
             "predicate": {
                 "type": "string",
-                "description": "Relationship type, e.g. 'likes', 'lives_in', 'works_at' (for facts_add, facts_invalidate).",
+                "description": "Relationship type, e.g. 'likes', 'lives_in', 'works_at'.",
             },
             "object": {
                 "type": "string",
@@ -208,15 +232,15 @@ memory_tool = ToolDef(
             },
             "valid_from": {
                 "type": "string",
-                "description": "ISO date (YYYY-MM-DD) when this fact became true, or end date for invalidation.",
+                "description": "ISO date (YYYY-MM-DD) when a fact became true, or end date for invalidation.",
             },
             "as_of": {
                 "type": "string",
-                "description": "ISO date to query facts as of a specific point in time (for facts_query).",
+                "description": "ISO date to query facts as of a specific point in time.",
             },
             "n_results": {
                 "type": "integer",
-                "description": "Max results for search (default 5).",
+                "description": "Max results for search (default 20).",
             },
         },
         "required": ["action"],

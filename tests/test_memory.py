@@ -1,10 +1,9 @@
-"""Tests for the memory tool (semantic search + KG wrapper)."""
+"""Tests for the memory tool (daily-log search/store + KG wrapper)."""
 
 import pytest
 import pytest_asyncio
 from hypothesis import given, settings as hsettings, HealthCheck
 from hypothesis import strategies as st
-from unittest.mock import patch
 
 from aineko.tools.memory import _memory
 import aineko.tools.memory as memory_mod
@@ -14,18 +13,17 @@ import aineko.tools.memory as memory_mod
 VALID_ACTIONS = [
     "search",
     "store",
+    "read",
     "facts_query",
     "facts_add",
     "facts_invalidate",
     "facts_timeline",
 ]
 
-# Strings that are NOT valid actions
 invalid_action = st.text(min_size=1, max_size=50).filter(
     lambda s: s not in VALID_ACTIONS
 )
 
-# Realistic entity-like strings
 entity_text = st.text(
     alphabet=st.sampled_from(
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-"
@@ -33,6 +31,7 @@ entity_text = st.text(
     min_size=1,
     max_size=40,
 )
+
 
 # --- fixtures ---
 
@@ -43,14 +42,12 @@ async def setup_db(pg_db):
 
 
 @pytest.fixture(autouse=True)
-def fresh_store():
-    """Give each test a fresh ephemeral MemoryStore."""
-    from aineko.memory.store import MemoryStore
-
-    store = MemoryStore(persist_dir=None)
-    with patch.object(memory_mod, "_store", store):
-        with patch.object(memory_mod, "_get_store", return_value=store):
-            yield store
+def memory_dir(tmp_path, monkeypatch):
+    """Give each test a fresh empty memory dir."""
+    d = tmp_path / "memory"
+    d.mkdir()
+    monkeypatch.setattr(memory_mod, "_memory_dir", d)
+    return d
 
 
 # --- property-based tests ---
@@ -113,7 +110,7 @@ class TestMemoryProperties:
             "facts_add", subject=subject, predicate=predicate, object=obj
         )
         assert isinstance(result, str)
-        assert "Error" not in result  # all fields provided, should succeed
+        assert "Error" not in result
 
     @given(entity=entity_text)
     @hsettings(
@@ -142,37 +139,25 @@ class TestMemorySearch:
         assert "No memories" in result
 
     @pytest.mark.asyncio
-    async def test_search_finds_stored(self, fresh_store):
-        fresh_store.add(
-            "Jakob loves hiking in the mountains on weekends.",
-            source="user",
+    async def test_search_finds_stored(self):
+        await _memory(
+            "store", content="Jakob loves hiking in the mountains on weekends."
         )
-        result = await _memory("search", query="hiking mountains")
+        result = await _memory("search", query="hiking")
         assert "hiking" in result
 
     @pytest.mark.asyncio
-    async def test_search_shows_similarity(self, fresh_store):
-        fresh_store.add(
-            "The project deadline is next Friday for the demo.",
-            source="work",
-        )
-        result = await _memory("search", query="project deadline")
-        assert "%" in result
+    async def test_search_returns_path_and_line(self, memory_dir):
+        await _memory("store", content="unique marker xyz123")
+        result = await _memory("search", query="xyz123")
+        assert str(memory_dir) in result
+        assert ":" in result
 
     @pytest.mark.asyncio
-    async def test_search_with_tags_filter(self, fresh_store):
-        fresh_store.add(
-            "Important meeting notes about project alpha launch.",
-            source="work",
-            tags={"type": "meeting"},
-        )
-        fresh_store.add(
-            "Grocery list for the week including fruits and vegetables.",
-            source="personal",
-            tags={"type": "todo"},
-        )
-        result = await _memory("search", query="weekly plans", tags="type=meeting")
-        assert "meeting" in result.lower() or "project" in result.lower()
+    async def test_search_case_insensitive(self):
+        await _memory("store", content="Project Alpha launches next quarter.")
+        result = await _memory("search", query="project alpha")
+        assert "Alpha" in result or "alpha" in result
 
 
 class TestMemoryStore:
@@ -182,55 +167,61 @@ class TestMemoryStore:
         assert "required" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_store_saves_content(self, fresh_store):
+    async def test_store_writes_file(self, memory_dir):
         result = await _memory(
             "store", content="Important note about the deployment process."
         )
-        assert "Stored" in result
-        assert fresh_store.count() >= 1
+        assert "Appended" in result
+        files = list(memory_dir.glob("*.md"))
+        assert len(files) == 1
+        assert "deployment" in files[0].read_text()
 
     @pytest.mark.asyncio
-    async def test_store_with_source(self, fresh_store):
-        result = await _memory(
-            "store",
-            content="User prefers dark mode in every application.",
-            source="user",
-        )
-        assert "user" in result
+    async def test_store_is_append_only(self, memory_dir):
+        await _memory("store", content="first entry text")
+        await _memory("store", content="second entry text")
+        files = list(memory_dir.glob("*.md"))
+        assert len(files) == 1
+        text = files[0].read_text()
+        assert "first entry text" in text
+        assert "second entry text" in text
 
     @pytest.mark.asyncio
-    async def test_store_default_source(self, fresh_store):
-        result = await _memory(
-            "store", content="A note without an explicit source label."
-        )
-        assert "agent" in result
-
-    @pytest.mark.asyncio
-    async def test_store_dedup(self, fresh_store):
+    async def test_store_records_source_and_tags(self, memory_dir):
         await _memory(
             "store",
-            content="Duplicate content that should not be stored twice in memory.",
+            content="sprint planning notes",
+            source="user",
+            tags="type=meeting",
         )
-        result = await _memory(
-            "store",
-            content="Duplicate content that should not be stored twice in memory.",
-        )
-        assert "duplicate" in result.lower()
+        text = next(memory_dir.glob("*.md")).read_text()
+        assert "user" in text
+        assert "meeting" in text
 
     @pytest.mark.asyncio
-    async def test_store_with_tags(self, fresh_store):
-        result = await _memory(
-            "store",
-            content="Meeting notes from the sprint planning session on Monday.",
-            tags="type=meeting,topic=sprint",
-        )
-        assert "Stored" in result
-
-    @pytest.mark.asyncio
-    async def test_store_then_search_roundtrip(self, fresh_store):
+    async def test_store_then_search_roundtrip(self):
         await _memory("store", content="The server runs on port 8080 in production.")
-        result = await _memory("search", query="server port production")
+        result = await _memory("search", query="8080")
         assert "8080" in result
+
+
+class TestMemoryRead:
+    @pytest.mark.asyncio
+    async def test_read_requires_path(self):
+        result = await _memory("read")
+        assert "required" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_read_missing_file(self, memory_dir):
+        result = await _memory("read", path="nope.md")
+        assert "No content" in result
+
+    @pytest.mark.asyncio
+    async def test_read_returns_content(self, memory_dir):
+        await _memory("store", content="line one two three")
+        log_path = next(memory_dir.glob("*.md"))
+        result = await _memory("read", path=log_path.name)
+        assert "line one two three" in result
 
 
 class TestMemoryFacts:
@@ -282,7 +273,6 @@ class TestMemoryFacts:
         result = await _memory("facts_timeline", entity="Max")
         assert "swimming" in result
         assert "chess" in result
-        # swimming should appear before chess (chronological)
         assert result.index("swimming") < result.index("chess")
 
     @pytest.mark.asyncio

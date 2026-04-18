@@ -7,6 +7,7 @@ from aineko.compaction import (
     should_compact,
     build_compaction_prompt,
     compact_messages,
+    run_memory_flush,
 )
 
 # --- should_compact ---
@@ -165,3 +166,55 @@ async def test_compact_messages_too_short_returns_unchanged():
     assert result == messages
     assert summary is None
     mock_kimi.chat.assert_not_called()
+
+
+# --- run_memory_flush ---
+
+
+@pytest.mark.asyncio
+async def test_memory_flush_invokes_chat_loop():
+    """Flush injects system + user prompts and calls chat_loop with the transcript."""
+    from aineko.kimi.client import ChatResponse
+
+    mock_kimi = MagicMock()
+    mock_kimi.chat_loop = AsyncMock(
+        return_value=ChatResponse(content="[SILENT_REPLY_TOKEN]")
+    )
+
+    messages = [
+        {"role": "system", "content": "original system prompt"},
+        {"role": "user", "content": "the user shared preferences"},
+        {"role": "assistant", "content": "acknowledged"},
+    ]
+    tools = MagicMock()
+    await run_memory_flush(messages, mock_kimi, tools)
+
+    mock_kimi.chat_loop.assert_called_once()
+    sent_messages, sent_tools = mock_kimi.chat_loop.call_args[0]
+    assert sent_tools is tools
+    assert sent_messages[0]["role"] == "system"
+    assert "memory flush" in sent_messages[0]["content"].lower()
+    assert any("preferences" in (m.get("content") or "") for m in sent_messages)
+    assert sent_messages[-1]["role"] == "user"
+    assert "memory flush" in sent_messages[-1]["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_memory_flush_handles_empty_messages():
+    mock_kimi = MagicMock()
+    mock_kimi.chat_loop = AsyncMock()
+    await run_memory_flush([], mock_kimi, None)
+    mock_kimi.chat_loop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_memory_flush_swallows_errors():
+    """A crash in the flush turn must not block compaction."""
+    mock_kimi = MagicMock()
+    mock_kimi.chat_loop = AsyncMock(side_effect=RuntimeError("boom"))
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+    ]
+    # Must not raise.
+    await run_memory_flush(messages, mock_kimi, None)

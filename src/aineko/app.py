@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from aineko.compaction import compact_messages, ingest_before_compaction, should_compact
+from aineko.compaction import compact_messages, run_memory_flush, should_compact
 from aineko.config import Settings
 from aineko.context import trim_messages
 from aineko.cron.scheduler import CronScheduler
@@ -42,7 +42,7 @@ from aineko.tools.files import edit_file_tool, read_file_tool, write_file_tool
 from aineko.tools.glob import glob_tool
 from aineko.tools.grep import grep_tool
 from aineko.tools.registry import ToolRegistry
-from aineko.tools.memory import memory_tool
+from aineko.tools.memory import init_memory_dir, memory_tool
 from aineko.tools import calendar as calendar_mod
 from aineko.tools import web_search as web_search_mod
 from aineko.tools.calendar import read_calendar_tool
@@ -101,10 +101,20 @@ def build_system_prompt(skills: SkillsEngine, soul_path: Path, memory_dir: Path)
         lines = [f"- **{s['name']}**: {s['description']}" for s in summaries]
         soul += "\n\n## Available Skills\n" + "\n".join(lines)
 
-    # Inject memory index if it exists
+    # Inject curated long-term memory index if present
     memory_index = memory_dir / "memory.md"
     if memory_index.exists():
         soul += "\n\n---\n\n" + memory_index.read_text()
+
+    soul += (
+        "\n\n## Memory Recall\n"
+        "Durable memories live in `memory/YYYY-MM-DD.md` under the data dir. "
+        "Use the `memory` tool with action=search to substring-search across "
+        "all daily logs, then action=read with a specific path+from_line to "
+        "pull only the lines you need. When citing, include "
+        "`Source: <path>#<line>`. Append new durable facts with action=store "
+        "— the tool always appends to today's log.\n"
+    )
 
     return soul
 
@@ -176,9 +186,8 @@ async def handle_message(
     summary_text: str | None = None
     if needs_compaction:
         logger.info("conversation approaching context limit, compacting")
-        ingest_before_compaction(
-            messages, session_id, msg.room_id, compaction_keep_recent
-        )
+        if kimi._settings.memory_flush_enabled:
+            await run_memory_flush(messages, kimi, request_tools)
         messages, summary_text = await compact_messages(
             messages,
             kimi,
@@ -246,6 +255,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     soul_path: Path = settings.data_dir / "soul.md"
     memory_dir: Path = settings.data_dir / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
+    init_memory_dir(memory_dir)
 
     # Run persistent setup script if it exists
     setup_script: Path = settings.data_dir / "setup.sh"
