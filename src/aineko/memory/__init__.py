@@ -1,12 +1,10 @@
-"""Semantic memory system for aineko.
+"""Memory subsystems for aineko.
 
-Three subsystems:
-- MemoryStore: ChromaDB-backed chunk store with embedding search
-- KnowledgeGraph: Temporal fact store (SQLAlchemy on existing DB)
-- ingest: Conversation → chunk pipeline
+- daily_log: Append-only daily markdown logs (active runtime store)
+- kg: Temporal fact store (SQLAlchemy on existing DB)
+- store/chunker: ChromaDB-backed store — kept for migration script only
 """
 
-from aineko.memory.chunker import chunk_text
-from aineko.memory.store import MemoryStore, SearchResult
+from aineko.memory.daily_log import append_to_today, read_log, search_logs
 
-__all__ = ["chunk_text", "MemoryStore", "SearchResult"]
+__all__ = ["append_to_today", "read_log", "search_logs"]
