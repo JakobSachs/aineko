@@ -22,7 +22,7 @@ def test_kimi_defaults():
     s = KimiSettings()
     assert s.model == "kimi-k2.5"
     assert s.base_url == "https://api.moonshot.cn/v1"
-    assert s.max_context_tokens == 262_144
+    assert s.max_context_tokens == 32_000
     assert s.thinking is True
     assert s.temperature == 1.0
     assert s.top_p == 0.95

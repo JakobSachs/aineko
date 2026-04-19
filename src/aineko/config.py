@@ -27,7 +27,7 @@ class KimiSettings(BaseSettings):
     api_key: str = ""
     model: str = "kimi-k2.5"
     base_url: str = "https://api.moonshot.cn/v1"
-    max_context_tokens: int = 262_144
+    max_context_tokens: int = 32_000
     compaction_keep_recent: int = 4  # messages to keep when compacting
     user_agent: str = ""  # required for some endpoints (e.g. Kimi coding API)
     thinking: bool = True  # enable reasoning mode (kimi-k2.5, kimi-k2-thinking)
