@@ -74,6 +74,7 @@ class HeartbeatRunner:
             if (
                 stripped
                 and not stripped.startswith("#")
+                and not stripped.startswith("<!--")
                 and stripped not in ("- [ ]", "- [x]")
             ):
                 return True

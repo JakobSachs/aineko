@@ -88,6 +88,12 @@ class TestHasTasks:
         heartbeat_file.write_text("# Tasks\n- [ ] check server logs\n")
         assert runner._has_tasks() is True
 
+    def test_only_html_comments(self, runner, heartbeat_file):
+        heartbeat_file.write_text(
+            "# Tasks\n<!-- aineko reads this every 30m -->\n<!-- say HEARTBEAT_OK -->\n"
+        )
+        assert runner._has_tasks() is False
+
     def test_non_checkbox_line(self, runner, heartbeat_file):
         heartbeat_file.write_text("check stuff\n")
         assert runner._has_tasks() is True

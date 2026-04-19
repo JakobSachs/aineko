@@ -29,12 +29,15 @@ async def heartbeat_tick_loop(
     interval: int = 0,
 ) -> None:
     """Run heartbeat ticks forever. Designed to be wrapped in asyncio.create_task."""
+    logger.info("heartbeat loop started", extra={"interval_s": interval})
     while True:
         await asyncio.sleep(interval)
         try:
             if not heartbeat.should_run():
+                logger.info("heartbeat tick skipped")
                 continue
 
+            logger.info("heartbeat tick firing")
             tasks_content = heartbeat.get_tasks()
             messages = [
                 {"role": "system", "content": sys_prompt},
@@ -58,5 +61,8 @@ async def heartbeat_tick_loop(
                 if heartbeat_room:
                     footer = format_tool_footer(response.tool_history)
                     await matrix.send_message(heartbeat_room, response.content + footer)
+                    logger.info("heartbeat tick delivered")
+            else:
+                logger.info("heartbeat tick suppressed")
         except Exception:
             logger.exception("Heartbeat tick failed")
