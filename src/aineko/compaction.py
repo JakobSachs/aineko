@@ -125,12 +125,24 @@ async def run_memory_flush(
         logger.exception("memory flush turn failed; continuing with compaction")
 
 
-def should_compact(messages: list[dict[str, Any]], max_tokens: int) -> bool:
-    """Check if conversation needs compaction."""
+def should_compact(
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    last_input_tokens: int | None = None,
+) -> bool:
+    """Check if conversation needs compaction.
+
+    If ``last_input_tokens`` is provided, use the provider's own count from the
+    previous turn — the local ``estimate_tokens`` heuristic under-counts tool
+    schemas and structured blocks. Falls back to the heuristic when no prior
+    count is available (e.g. first turn after restart).
+    """
     if len(messages) < MIN_MESSAGES_FOR_COMPACTION:
         return False
-    total = sum(estimate_tokens(m.get("content", "") or "") for m in messages)
     threshold = max_tokens - COMPACTION_RESERVE
+    if last_input_tokens is not None:
+        return last_input_tokens >= threshold
+    total = sum(estimate_tokens(m.get("content", "") or "") for m in messages)
     return total >= threshold
 
 

@@ -36,7 +36,7 @@ from aineko.rss.poller import rss_cleanup_loop, rss_poll_loop
 from aineko.heartbeat.runner import HeartbeatRunner
 from aineko.kimi.client import ChatResponse, KimiClient
 from aineko.matrix.client import MatrixConnector
-from aineko.models.message import Message, Role
+from aineko.models.message import Message, Role, Session
 from aineko.routes.health import router as health_router
 from aineko.schemas.message import IncomingMessage
 from aineko.skills.engine import SkillsEngine
@@ -123,6 +123,7 @@ async def handle_message(
 ) -> None:
     """Core message handler: load session, run agent, send reply."""
     from sqlalchemy import delete as sa_delete
+    from sqlalchemy import update as sa_update
 
     assert _db.async_session_factory is not None
 
@@ -142,6 +143,7 @@ async def handle_message(
         session, user_msg, messages = await load_conversation(db, msg, sys_prompt)
         session_id: int = session.id
         user_msg_id: int = user_msg.id
+        last_input_tokens: int | None = session.last_input_tokens
 
         from aineko.context import estimate_tokens
 
@@ -151,12 +153,15 @@ async def handle_message(
             extra={
                 "event": "context_size",
                 "estimated_tokens": estimated_ctx,
+                "last_input_tokens": last_input_tokens,
                 "max_tokens": max_context_tokens,
                 "msg_count": len(messages),
             },
         )
 
-        needs_compaction: bool = should_compact(messages, max_context_tokens)
+        needs_compaction: bool = should_compact(
+            messages, max_context_tokens, last_input_tokens=last_input_tokens
+        )
         history_ids: list[int] = []
         if needs_compaction:
             from sqlalchemy import select
@@ -212,6 +217,13 @@ async def handle_message(
                     role=Role.SYSTEM,
                     content=summary_text,
                 )
+            )
+        input_tokens = response.usage.get("input_tokens")
+        if input_tokens is not None:
+            await db.execute(
+                sa_update(Session)
+                .where(Session.id == session_id)
+                .values(last_input_tokens=int(input_tokens))
             )
         await persist_response(db, session_id, user_msg_id, response, sent_messages)
 
