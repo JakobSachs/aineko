@@ -143,3 +143,49 @@ class TestHandleMessageIntegration:
         second_call_messages = kimi.chat_loop.call_args_list[1][0][0]
         # system + user("hello") + assistant("hi there") + user("follow up")
         assert len(second_call_messages) >= 4
+
+    @pytest.mark.asyncio
+    async def test_compaction_deletes_tool_logs_with_messages(
+        self, setup_db, matrix, skills, data_dir
+    ):
+        """Compaction's DELETE FROM messages must also delete dependent
+        tool_logs rows, otherwise Postgres raises a ForeignKeyViolationError
+        (tool_logs.message_id FK has no ON DELETE CASCADE)."""
+        from aineko.kimi.client import ChatResponse, ToolCallRecord
+
+        tools = ToolRegistry()
+        kimi = AsyncMock()
+        # Every turn returns a tool call so tool_logs rows are created for
+        # each user message.
+        kimi.chat_loop.return_value = ChatResponse(
+            content="ok",
+            usage={"input_tokens": 50_000, "total_tokens": 50_100},
+            tool_history=[
+                ToolCallRecord(tool_name="noop", arguments="{}", result="done")
+            ],
+        )
+        # memory_flush_enabled reads .chat — mock it too.
+        kimi.chat = AsyncMock(return_value=ChatResponse(content="summary", usage={}))
+        # Minimal settings stub accessed by handle_message / compaction.
+        kimi._settings = MagicMock(memory_flush_enabled=False)
+
+        # Seven turns to exceed MIN_MESSAGES_FOR_COMPACTION; low context limit
+        # makes should_compact fire via the provider-reported input_tokens
+        # path on turns 2+.
+        for i in range(7):
+            m = IncomingMessage(
+                room_id="!room:test",
+                sender="@user:test",
+                body=f"msg {i}",
+                event_id=f"$evt{i}",
+                timestamp=datetime.now(timezone.utc),
+            )
+            await handle_message(
+                m,
+                kimi,
+                tools,
+                skills,
+                matrix,
+                data_dir,
+                max_context_tokens=40_000,
+            )

@@ -36,7 +36,7 @@ from aineko.rss.poller import rss_cleanup_loop, rss_poll_loop
 from aineko.heartbeat.runner import HeartbeatRunner
 from aineko.kimi.client import ChatResponse, KimiClient
 from aineko.matrix.client import MatrixConnector
-from aineko.models.message import Message, Role, Session
+from aineko.models.message import Message, Role, Session, ToolLog
 from aineko.routes.health import router as health_router
 from aineko.schemas.message import IncomingMessage
 from aineko.skills.engine import SkillsEngine
@@ -211,6 +211,9 @@ async def handle_message(
     async with _db.async_session_factory() as db:
         if summary_text:
             if old_msg_ids := history_ids[:old_removed]:
+                await db.execute(
+                    sa_delete(ToolLog).where(ToolLog.message_id.in_(old_msg_ids))
+                )
                 await db.execute(sa_delete(Message).where(Message.id.in_(old_msg_ids)))
             db.add(
                 Message(
