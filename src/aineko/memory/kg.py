@@ -7,13 +7,14 @@ database as conversations.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy import DateTime, Integer, String, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aineko.db import Base
+from aineko.time import today_local
 
 
 class Fact(Base):
@@ -134,7 +135,7 @@ class KnowledgeGraph:
         ``False`` otherwise.
         """
         if ended is None:
-            ended = date.today().isoformat()
+            ended = today_local().isoformat()
 
         result = await db.execute(
             select(Fact).where(

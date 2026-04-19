@@ -7,8 +7,9 @@ ChromaDB-backed semantic store with human-readable, git-diffable logs.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
+
+from aineko.time import now_local
 
 
 @dataclass
@@ -19,7 +20,7 @@ class LogMatch:
 
 
 def _today_path(memory_dir: Path) -> Path:
-    return memory_dir / f"{datetime.now().strftime('%Y-%m-%d')}.md"
+    return memory_dir / f"{now_local().strftime('%Y-%m-%d')}.md"
 
 
 def append_to_today(memory_dir: Path, text: str) -> Path:
@@ -27,7 +28,7 @@ def append_to_today(memory_dir: Path, text: str) -> Path:
     and parent directory if needed. Returns the file path."""
     memory_dir.mkdir(parents=True, exist_ok=True)
     path = _today_path(memory_dir)
-    ts = datetime.now().strftime("%H:%M:%S")
+    ts = now_local().strftime("%H:%M:%S")
     entry = f"\n## {ts}\n\n{text.strip()}\n"
     with path.open("a", encoding="utf-8") as f:
         f.write(entry)

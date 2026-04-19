@@ -7,7 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 import feedparser
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -137,7 +137,9 @@ async def rss_cleanup_loop() -> None:
     assert _db.async_session_factory is not None
     while True:
         try:
-            cutoff = datetime.utcnow() - timedelta(days=_CLEANUP_AGE_DAYS)
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+                days=_CLEANUP_AGE_DAYS
+            )
             async with _db.async_session_factory() as db:
                 result = await db.execute(
                     delete(RssSeenItem).where(RssSeenItem.seen_at < cutoff)

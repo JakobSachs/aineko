@@ -30,15 +30,11 @@ def runner(settings, heartbeat_file):
 
 
 def _mock_local_time(hour, minute=0):
-    """Create a mock datetime.now() that returns a fake local time via .astimezone()."""
+    """Return a MagicMock suitable for patching `now_local` in runner."""
     local = MagicMock()
     local.hour = hour
     local.minute = minute
-    mock_dt = MagicMock()
-    utc_now = MagicMock()
-    utc_now.astimezone.return_value = local
-    mock_dt.now.return_value = utc_now
-    return mock_dt
+    return MagicMock(return_value=local)
 
 
 class TestShouldRun:
@@ -52,7 +48,7 @@ class TestShouldRun:
 
     def test_outside_active_hours(self, runner, heartbeat_file):
         heartbeat_file.write_text("- check logs")
-        with patch("aineko.heartbeat.runner.datetime", _mock_local_time(3, 0)):
+        with patch("aineko.heartbeat.runner.now_local", _mock_local_time(3, 0)):
             assert runner.should_run() is False
 
     def test_no_tasks(self, runner):
@@ -64,7 +60,7 @@ class TestShouldRun:
 
     def test_all_conditions_met(self, runner, heartbeat_file):
         heartbeat_file.write_text("- check the logs")
-        with patch("aineko.heartbeat.runner.datetime", _mock_local_time(12, 0)):
+        with patch("aineko.heartbeat.runner.now_local", _mock_local_time(12, 0)):
             assert runner.should_run() is True
 
 
@@ -131,21 +127,21 @@ class TestShouldDeliver:
 
 class TestInActiveHours:
     def test_within_hours(self, runner):
-        with patch("aineko.heartbeat.runner.datetime", _mock_local_time(12, 0)):
+        with patch("aineko.heartbeat.runner.now_local", _mock_local_time(12, 0)):
             assert runner._in_active_hours() is True
 
     def test_before_start(self, runner):
-        with patch("aineko.heartbeat.runner.datetime", _mock_local_time(5, 0)):
+        with patch("aineko.heartbeat.runner.now_local", _mock_local_time(5, 0)):
             assert runner._in_active_hours() is False
 
     def test_after_end(self, runner):
-        with patch("aineko.heartbeat.runner.datetime", _mock_local_time(23, 30)):
+        with patch("aineko.heartbeat.runner.now_local", _mock_local_time(23, 30)):
             assert runner._in_active_hours() is False
 
     def test_at_exact_start(self, runner):
-        with patch("aineko.heartbeat.runner.datetime", _mock_local_time(8, 0)):
+        with patch("aineko.heartbeat.runner.now_local", _mock_local_time(8, 0)):
             assert runner._in_active_hours() is True
 
     def test_at_exact_end(self, runner):
-        with patch("aineko.heartbeat.runner.datetime", _mock_local_time(23, 0)):
+        with patch("aineko.heartbeat.runner.now_local", _mock_local_time(23, 0)):
             assert runner._in_active_hours() is True

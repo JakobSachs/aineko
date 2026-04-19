@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import delete, select
 
 from aineko.models.message import Message, Role, Session, ToolLog
+from aineko.time import local_tz
 from aineko.tools.messaging import (
     make_background_task_tools,
     make_send_file_tool,
@@ -177,7 +179,9 @@ async def load_conversation(
             messages.append({"role": "system", "content": m.content})
         elif m.role == Role.USER:
             # Tag every user message with its timestamp so the model perceives time
-            tag = f"\n[sent {m.created_at.strftime('%Y-%m-%d %H:%M UTC')}]"
+            tz = local_tz()
+            local_ts = m.created_at.replace(tzinfo=timezone.utc).astimezone(tz)
+            tag = f"\n[sent {local_ts.strftime('%Y-%m-%d %H:%M %Z')}]"
             messages.append({"role": "user", "content": m.content + tag})
         else:
             messages.append({"role": m.role.value, "content": m.content})

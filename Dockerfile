@@ -7,7 +7,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3.12 python3.12-dev python3.12-venv \
         libolm-dev gcc clang curl ca-certificates git ripgrep \
-        libnuma1 libdrm2 poppler-utils imagemagick file jq && \
+        libnuma1 libdrm2 poppler-utils imagemagick file jq tzdata && \
     rm -rf /var/lib/apt/lists/*
 
 # Install uv

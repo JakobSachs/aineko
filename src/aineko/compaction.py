@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime
 from typing import Any
 
 from aineko.context import estimate_tokens
+from aineko.time import now_local
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ def _memory_flush_user_prompt() -> str:
         "Do NOT create timestamped variant files (e.g., YYYY-MM-DD-HHMM.md); "
         "always use the canonical YYYY-MM-DD.md filename.\n"
         f"If nothing to store, reply with {SILENT_REPLY_TOKEN}.\n"
-        f"Current time: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"Current time: {now_local().isoformat(timespec='seconds')}\n"
     )
 
 

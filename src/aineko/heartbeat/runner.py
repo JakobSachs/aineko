@@ -1,10 +1,10 @@
 """Heartbeat runner with smart pre-filtering."""
 
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 
 from aineko.config import HeartbeatSettings
+from aineko.time import now_local
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class HeartbeatRunner:
         return True
 
     def _in_active_hours(self) -> bool:
-        now = datetime.now(timezone.utc).astimezone()
+        now = now_local()
         start_h, start_m = map(int, self._settings.active_hours_start.split(":"))
         end_h, end_m = map(int, self._settings.active_hours_end.split(":"))
         current = now.hour * 60 + now.minute
