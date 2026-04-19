@@ -178,11 +178,12 @@ async def handle_message(
     # commits atomically with the assistant response. If the main LLM call
     # below fails, compaction is discarded too, preserving retry consistency.
     summary_text: str | None = None
+    old_removed: int = 0
     if needs_compaction:
         logger.info("conversation approaching context limit, compacting")
         if kimi._settings.memory_flush_enabled:
             await run_memory_flush(messages, kimi, request_tools)
-        messages, summary_text = await compact_messages(
+        messages, summary_text, old_removed = await compact_messages(
             messages,
             kimi,
             keep_recent=compaction_keep_recent,
@@ -209,7 +210,7 @@ async def handle_message(
     # transaction. persist_response commits at the end.
     async with _db.async_session_factory() as db:
         if summary_text:
-            if old_msg_ids := history_ids[:-compaction_keep_recent]:
+            if old_msg_ids := history_ids[:old_removed]:
                 await db.execute(sa_delete(Message).where(Message.id.in_(old_msg_ids)))
             db.add(
                 Message(

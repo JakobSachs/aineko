@@ -110,7 +110,9 @@ async def test_compact_messages_returns_summary():
         {"role": "user", "content": "latest question"},
     ]
 
-    result, summary = await compact_messages(messages, mock_kimi, keep_recent=4)
+    result, summary, _removed = await compact_messages(
+        messages, mock_kimi, keep_recent=4
+    )
 
     # Should have: system + compaction summary + recent messages
     assert result[0]["role"] == "system"
@@ -144,7 +146,9 @@ async def test_compact_messages_preserves_system():
         {"role": "user", "content": "new"},
     ]
 
-    result, summary = await compact_messages(messages, mock_kimi, keep_recent=2)
+    result, summary, _removed = await compact_messages(
+        messages, mock_kimi, keep_recent=2
+    )
     assert result[0]["content"] == "original system prompt"
     assert summary is not None
 
@@ -161,11 +165,51 @@ async def test_compact_messages_too_short_returns_unchanged():
         {"role": "assistant", "content": "hi"},
     ]
 
-    result, summary = await compact_messages(messages, mock_kimi, keep_recent=4)
+    result, summary, _removed = await compact_messages(
+        messages, mock_kimi, keep_recent=4
+    )
     # Too few messages to compact — returned unchanged
     assert result == messages
     assert summary is None
     mock_kimi.chat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_compact_messages_boundary_skips_orphan_tool_result():
+    """Kept window must start at a user message so tool_result messages don't
+    reference tool_call_ids in deleted older turns (API rejects with
+    "tool_call_id is not found")."""
+    from aineko.kimi.client import ChatResponse
+
+    mock_kimi = MagicMock()
+    mock_kimi.chat = AsyncMock(return_value=ChatResponse(content="summary", usage={}))
+
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t2"}]},
+        {"role": "tool", "tool_call_id": "t2", "content": "r2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+    # conversation has 6 items; keep_recent=3 naively starts at index 3
+    # (tool_use assistant) → orphan. Boundary walk forward moves split to 4
+    # (index of the next user message, "q2" sits at index 2 so actually the
+    # next user boundary is past the end) — in this shape the kept window
+    # shrinks so no orphan remains. Specifically: split advances to end,
+    # everything is compacted, summary is the only non-system thing left.
+    result, summary, removed = await compact_messages(
+        messages, mock_kimi, keep_recent=3
+    )
+    assert summary is not None
+    # Every kept (non-system) message must be role=user or be preceded by a user.
+    roles = [m["role"] for m in result[1:]]
+    # first non-sys-prompt message is the summary system note; after that
+    # either empty (all compacted) or starts with a user.
+    if len(roles) > 1:
+        assert roles[1] == "user"
+    assert removed >= 4
 
 
 # --- run_memory_flush ---

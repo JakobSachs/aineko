@@ -180,7 +180,7 @@ async def compact_messages(
     messages: list[dict[str, Any]],
     kimi_client: Any,
     keep_recent: int = 4,
-) -> tuple[list[dict[str, Any]], str | None]:
+) -> tuple[list[dict[str, Any]], str | None, int]:
     """Compact old messages into a summary, keeping recent ones intact.
 
     Args:
@@ -189,11 +189,15 @@ async def compact_messages(
         keep_recent: Number of recent conversation messages to preserve
 
     Returns:
-        (compacted_messages, summary_text) — summary_text is None if no
-        compaction was performed.
+        (compacted_messages, summary_text, old_removed) — ``summary_text`` is
+        ``None`` if no compaction was performed, and ``old_removed`` is the
+        number of conversation messages that were replaced by the summary.
+        Callers should use ``old_removed`` (not ``keep_recent``) to decide
+        which DB message rows to delete — the kept window may expand beyond
+        ``keep_recent`` so it starts at a user-role boundary.
     """
     if not messages:
-        return messages, None
+        return messages, None, 0
 
     # Split system prompt from conversation
     system_msg = messages[0] if messages[0].get("role") == "system" else None
@@ -201,14 +205,22 @@ async def compact_messages(
 
     # Not enough to compact
     if len(conversation) <= keep_recent:
-        return messages, None
+        return messages, None, 0
 
-    # Split into old (to summarize) and recent (to keep)
-    old_messages = conversation[:-keep_recent]
-    recent_messages = conversation[-keep_recent:]
+    # Split into old (to summarize) and recent (to keep). Walk the boundary
+    # forward until it lands on a user message so the kept window does not
+    # start mid tool_use/tool_result chain — orphaned tool_result blocks
+    # reference a deleted tool_call_id and the API rejects them with
+    # "tool_call_id is not found". This may shrink the kept window below
+    # ``keep_recent``; if it consumes the whole tail, nothing is kept.
+    split = len(conversation) - keep_recent
+    while split < len(conversation) and conversation[split].get("role") != "user":
+        split += 1
+    old_messages = conversation[:split]
+    recent_messages = conversation[split:]
 
     if not old_messages:
-        return messages, None
+        return messages, None, 0
 
     # Build prompt and call LLM for summary
     all_for_summary = ([system_msg] if system_msg else []) + old_messages
@@ -249,4 +261,4 @@ async def compact_messages(
     result.append({"role": "system", "content": summary_content})
     result.extend(recent_messages)
 
-    return result, summary_content
+    return result, summary_content, len(old_messages)
