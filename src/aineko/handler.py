@@ -83,6 +83,7 @@ async def handle_command(
     result = await db.execute(select(Session).where(Session.room_id == msg.room_id))
     session: Session | None = result.scalar_one_or_none()
     if session:
+        await db.execute(delete(ToolLog).where(ToolLog.session_id == session.id))
         await db.execute(delete(Message).where(Message.session_id == session.id))
         await db.commit()
 
