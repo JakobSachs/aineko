@@ -441,7 +441,7 @@ class MatrixConnector:
 
         # Download the file
         mxc_url = event.url
-        filename = getattr(event, "body", "file")
+        filename = Path(getattr(event, "body", "file")).name
         logger.info(
             "file received",
             extra={
