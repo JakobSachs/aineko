@@ -28,9 +28,11 @@ Restarts are owned by **systemd** (`Restart=on-failure` in the unit), not by pod
 
 ### Database and migrations
 
-The app DB is SQLite at `/data/aineko.db` (mounted from `./data/` on the host). On container start, `alembic upgrade head` runs first, then the app launches.
+The app DB is Postgres, run as a sidecar `postgres` service in `docker-compose.yml` (image `postgres:17-alpine`, data in the `postgres-data` volume, exposed on `127.0.0.1:5432`). The aineko container `depends_on` postgres being healthy before starting.
 
-> **Known issue:** `alembic.ini` currently hardcodes a relative URL (`sqlite+aiosqlite:///aineko.db`), so inside the container alembic migrates `/app/aineko.db` — a disposable file — not the real `/data/aineko.db`. Schema changes to existing prod tables won't apply until `alembic/env.py` is wired to use `Settings().db_url`. New tables still appear in prod because `db.create_tables()` runs on app startup.
+Connection URL resolution lives in `Settings.db_url` (`src/aineko/config.py`): it uses `AINEKO_DATABASE_URL` / `database_url` if set, otherwise defaults to `postgresql+asyncpg://aineko:aineko@postgres:5432/aineko`. Credentials and DB name come from `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` env vars (defaults: `aineko`/`aineko`/`aineko`).
+
+On container start, `alembic upgrade head` runs first, then the app launches. `alembic/env.py` reads the URL from `AINEKO_DATABASE_URL` or `Settings().db_url`, so migrations hit the real DB (the old SQLite-on-/app quirk is gone).
 
 ## Development
 
