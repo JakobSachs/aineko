@@ -40,7 +40,6 @@ class HeartbeatSettings(BaseSettings):
     every_minutes: int = 30
     active_hours_start: str = "08:00"
     active_hours_end: str = "23:00"
-    room: str = ""  # defaults to matrix.room_id if empty
 
 
 class CalDavSettings(BaseSettings):
@@ -67,7 +66,6 @@ class RssSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="RSS_")
 
     enabled: bool = False
-    room: str = ""  # defaults to matrix.room_id if empty
     poll_interval: int = 300  # seconds
 
 

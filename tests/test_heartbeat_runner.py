@@ -15,7 +15,6 @@ def settings():
         every_minutes=30,
         active_hours_start="08:00",
         active_hours_end="23:00",
-        room="!room:test",
     )
 
 
