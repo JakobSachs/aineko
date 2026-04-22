@@ -37,7 +37,7 @@ MATRIX_HOMESERVER="https://matrix.org"
 | `MATRIX_USER_ID` | Bot's full user ID, e.g. `@aineko:matrix.org` |
 | `MATRIX_ACCESS_TOKEN` | Access token from login (see below) |
 | `MATRIX_PASSWORD` | Bot's password (alternative to access_token) |
-| `MATRIX_ROOMS` | Comma-separated room IDs to listen in |
+| `MATRIX_ROOM_ID` | Room ID to listen in (single room) |
 
 ### LLM API
 

@@ -3,19 +3,14 @@
 from aineko.config import MatrixSettings, KimiSettings, Settings
 
 
-def test_matrix_room_list():
-    s = MatrixSettings(rooms="!a:x,!b:x, !c:x ")
-    assert s.room_list == ["!a:x", "!b:x", "!c:x"]
+def test_matrix_room_id():
+    s = MatrixSettings(room_id="!room:test")
+    assert s.room_id == "!room:test"
 
 
-def test_matrix_room_list_empty():
-    s = MatrixSettings(rooms="")
-    assert s.room_list == []
-
-
-def test_matrix_room_list_single():
-    s = MatrixSettings(rooms="!room:test")
-    assert s.room_list == ["!room:test"]
+def test_matrix_room_id_default_empty():
+    s = MatrixSettings()
+    assert s.room_id == ""
 
 
 def test_kimi_defaults():

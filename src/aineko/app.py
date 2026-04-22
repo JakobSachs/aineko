@@ -337,9 +337,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Heartbeat periodic task
     if settings.heartbeat.enabled:
-        heartbeat_room: str = settings.heartbeat.room or (
-            settings.matrix.room_list[0] if settings.matrix.room_list else ""
-        )
+        heartbeat_room: str = settings.heartbeat.room or settings.matrix.room_id
         interval: int = settings.heartbeat.every_minutes * 60
         bg_tasks.append(
             asyncio.create_task(
@@ -370,9 +368,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             logger.warning("RSS enabled but %s not found", settings.rss_feeds_file)
 
         if rss_feeds:
-            rss_room: str = settings.rss.room or (
-                settings.matrix.room_list[0] if settings.matrix.room_list else ""
-            )
+            rss_room: str = settings.rss.room or settings.matrix.room_id
             bg_tasks.append(
                 asyncio.create_task(
                     rss_poll_loop(

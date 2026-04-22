@@ -27,7 +27,7 @@ def connector(store_path):
     settings.user_id = "@bot:test"
     settings.access_token = "fake"
     settings.password = ""
-    settings.room_list = ["!room:test"]
+    settings.room_id = "!room:test"
     return MatrixConnector(settings, store_path)
 
 

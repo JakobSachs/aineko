@@ -96,21 +96,22 @@ async def test_messages_during_processing_queued():
 
 
 @pytest.mark.asyncio
-async def test_different_rooms_independent():
-    """Messages in different rooms are processed independently."""
+async def test_messages_share_single_queue():
+    """Single-room deployment: all enqueued messages batch into one handler call
+    regardless of msg.room_id — there is no per-room partitioning anymore."""
     received: list[IncomingMessage] = []
 
     async def handler(msg: IncomingMessage) -> None:
         received.append(msg)
 
     q = MessageQueue(handler)
-    await q.enqueue(_msg("room1 msg", room="!room1:test"))
-    await q.enqueue(_msg("room2 msg", room="!room2:test"))
+    await q.enqueue(_msg("a", room="!room1:test"))
+    await q.enqueue(_msg("b", room="!room2:test"))
     await asyncio.sleep(0.05)
 
-    assert len(received) == 2
-    rooms = {r.room_id for r in received}
-    assert rooms == {"!room1:test", "!room2:test"}
+    assert len(received) == 1
+    assert "[message 1]: a" in received[0].body
+    assert "[message 2]: b" in received[0].body
 
 
 # ---------------------------------------------------------------------------

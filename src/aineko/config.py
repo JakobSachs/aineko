@@ -13,12 +13,8 @@ class MatrixSettings(BaseSettings):
     user_id: str = ""
     access_token: str = ""
     password: str = ""  # used for initial login if no access_token
-    rooms: str = ""  # comma-separated room IDs
+    room_id: str = ""  # the single matrix room this bot talks in
     owner: str = ""  # only this matrix user is allowed to talk to the bot
-
-    @property
-    def room_list(self) -> list[str]:
-        return [r.strip() for r in self.rooms.split(",") if r.strip()]
 
 
 class KimiSettings(BaseSettings):
@@ -44,7 +40,7 @@ class HeartbeatSettings(BaseSettings):
     every_minutes: int = 30
     active_hours_start: str = "08:00"
     active_hours_end: str = "23:00"
-    room: str = ""  # defaults to first matrix room if empty
+    room: str = ""  # defaults to matrix.room_id if empty
 
 
 class CalDavSettings(BaseSettings):
@@ -71,7 +67,7 @@ class RssSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="RSS_")
 
     enabled: bool = False
-    room: str = ""  # defaults to first matrix room if empty
+    room: str = ""  # defaults to matrix.room_id if empty
     poll_interval: int = 300  # seconds
 
 

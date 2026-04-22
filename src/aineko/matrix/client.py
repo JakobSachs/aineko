@@ -343,7 +343,7 @@ class MatrixConnector:
             logger.debug("Ignoring own message (client user_id) in %s", room.room_id)
             return
 
-        if self._settings.room_list and room.room_id not in self._settings.room_list:
+        if self._settings.room_id and room.room_id != self._settings.room_id:
             return
 
         if self._settings.owner and event.sender != self._settings.owner:
@@ -427,7 +427,7 @@ class MatrixConnector:
             or event.sender == self._client.user_id
         ):
             return
-        if self._settings.room_list and room.room_id not in self._settings.room_list:
+        if self._settings.room_id and room.room_id != self._settings.room_id:
             return
         if self._settings.owner and event.sender != self._settings.owner:
             logger.warning(
