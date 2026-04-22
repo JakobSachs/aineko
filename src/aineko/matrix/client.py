@@ -205,18 +205,25 @@ class MatrixConnector:
         if not self._client.olm:
             logger.warning("Matrix: olm not initialized, E2EE disabled")
 
-        # Register all callbacks before sync so no events are missed
+        # Discover joined rooms first (no message callbacks yet) so we can
+        # leave any foreign rooms before events start firing.
         self._client.add_event_callback(self._on_megolm_event, MegolmEvent)
         self._client.add_to_device_callback(self._on_key_request, RoomKeyRequest)
         self._client.add_event_callback(self._on_invite, InviteMemberEvent)
+
+        logger.info("Matrix: initial sync...")
+        resp = await self._client.sync(timeout=10_000, full_state=True)
+
+        if self._settings.room_id:
+            for room_id in list(self._client.rooms.keys()):
+                if room_id != self._settings.room_id:
+                    logger.warning("Matrix: leaving foreign room %s", room_id)
+                    await self._client.room_leave(room_id)
+
+        # Now safe to register message callbacks — ingress can assert room_id.
         self._client.add_event_callback(self._on_room_message, RoomMessageText)
         self._client.add_event_callback(self._on_room_file, RoomMessageFile)
         self._client.add_event_callback(self._on_room_file, RoomMessageImage)
-
-        # Initial sync — if we have a next_batch token from a previous session,
-        # nio will only return events after that point (no replay needed).
-        logger.info("Matrix: initial sync...")
-        resp = await self._client.sync(timeout=10_000, full_state=True)
 
         # Auto-join any pending invites — only when no owner is configured.
         # When owner is set we can't easily verify the inviter from the bulk
@@ -343,8 +350,9 @@ class MatrixConnector:
             logger.debug("Ignoring own message (client user_id) in %s", room.room_id)
             return
 
-        if self._settings.room_list and room.room_id not in self._settings.room_list:
-            return
+        assert (
+            self._settings.room_id and room.room_id == self._settings.room_id
+        ), f"received message from foreign room {room.room_id}"
 
         if self._settings.owner and event.sender != self._settings.owner:
             logger.warning(
@@ -427,8 +435,9 @@ class MatrixConnector:
             or event.sender == self._client.user_id
         ):
             return
-        if self._settings.room_list and room.room_id not in self._settings.room_list:
-            return
+        assert (
+            self._settings.room_id and room.room_id == self._settings.room_id
+        ), f"received file from foreign room {room.room_id}"
         if self._settings.owner and event.sender != self._settings.owner:
             logger.warning(
                 "Matrix: dropping file from non-owner %s in %s",
@@ -517,7 +526,7 @@ class MatrixConnector:
         )
 
     async def _on_invite(self, room: MatrixRoom, event: InviteMemberEvent) -> None:
-        """Auto-join rooms — only when invited by the owner."""
+        """Auto-join the configured room — reject invites to any other room."""
         if event.state_key != self._settings.user_id or event.membership != "invite":
             return
         if self._settings.owner and event.sender != self._settings.owner:
@@ -525,6 +534,13 @@ class MatrixConnector:
                 "Matrix: ignoring invite to %s from non-owner %s",
                 room.room_id,
                 event.sender,
+            )
+            return
+        if self._settings.room_id and room.room_id != self._settings.room_id:
+            logger.warning(
+                "Matrix: rejecting invite to foreign room %s (configured: %s)",
+                room.room_id,
+                self._settings.room_id,
             )
             return
         logger.info(
