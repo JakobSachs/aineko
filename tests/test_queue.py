@@ -183,7 +183,7 @@ class TestQueueProperties:
     @hsettings(max_examples=20, deadline=None)
     @pytest.mark.asyncio
     async def test_no_concurrent_handlers(self, handler_ms: int, delays: list[int]):
-        """Handler never runs concurrently for the same room."""
+        """Handler never runs concurrently."""
         max_concurrent = 0
         concurrent = 0
 

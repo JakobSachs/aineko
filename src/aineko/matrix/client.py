@@ -351,7 +351,7 @@ class MatrixConnector:
             return
 
         assert (
-            not self._settings.room_id or room.room_id == self._settings.room_id
+            self._settings.room_id and room.room_id == self._settings.room_id
         ), f"received message from foreign room {room.room_id}"
 
         if self._settings.owner and event.sender != self._settings.owner:
@@ -436,7 +436,7 @@ class MatrixConnector:
         ):
             return
         assert (
-            not self._settings.room_id or room.room_id == self._settings.room_id
+            self._settings.room_id and room.room_id == self._settings.room_id
         ), f"received file from foreign room {room.room_id}"
         if self._settings.owner and event.sender != self._settings.owner:
             logger.warning(

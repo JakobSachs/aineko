@@ -99,9 +99,9 @@ The response contains `access_token` and `device_id`. Put the `access_token` in 
 
 **Important:** Do not log into the bot account with Element (or any other Matrix client) at the same time as running aineko. Both sessions will compete for encryption keys and cause decryption failures. If you need to manage the bot account via Element, stop aineko first.
 
-### 3. Get room IDs
+### 3. Get the room ID
 
-Create a room, invite the bot, and find the room ID in your Matrix client (Element: Room Settings > Advanced > Internal room ID). It looks like `!AbCdEf123:matrix.org`.
+Create a room, invite the bot, and find the room ID in your Matrix client (Element: Room Settings > Advanced > Internal room ID). It looks like `!AbCdEf123:matrix.org`. Put it in `MATRIX_ROOM_ID`.
 
 ### 4. Encrypted vs unencrypted rooms
 
