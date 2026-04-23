@@ -230,6 +230,12 @@ class MatrixConnector:
         # invited_rooms list, so we defer to the per-event _on_invite handler.
         if not self._settings.owner:
             for room_id in self._client.invited_rooms:
+                if self._settings.room_id and room_id != self._settings.room_id:
+                    logger.warning(
+                        "Matrix: skipping pending invite to foreign room %s",
+                        room_id,
+                    )
+                    continue
                 logger.info("Matrix: auto-joining room %s", room_id)
                 await self._client.join(room_id)
 
@@ -350,9 +356,13 @@ class MatrixConnector:
             logger.debug("Ignoring own message (client user_id) in %s", room.room_id)
             return
 
-        assert (
-            self._settings.room_id and room.room_id == self._settings.room_id
-        ), f"received message from foreign room {room.room_id}"
+        if not self._settings.room_id or room.room_id != self._settings.room_id:
+            logger.error(
+                "Matrix: dropping message from foreign room %s (configured: %s)",
+                room.room_id,
+                self._settings.room_id,
+            )
+            return
 
         if self._settings.owner and event.sender != self._settings.owner:
             logger.warning(
@@ -435,9 +445,13 @@ class MatrixConnector:
             or event.sender == self._client.user_id
         ):
             return
-        assert (
-            self._settings.room_id and room.room_id == self._settings.room_id
-        ), f"received file from foreign room {room.room_id}"
+        if not self._settings.room_id or room.room_id != self._settings.room_id:
+            logger.error(
+                "Matrix: dropping file from foreign room %s (configured: %s)",
+                room.room_id,
+                self._settings.room_id,
+            )
+            return
         if self._settings.owner and event.sender != self._settings.owner:
             logger.warning(
                 "Matrix: dropping file from non-owner %s in %s",
