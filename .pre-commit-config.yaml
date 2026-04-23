@@ -16,7 +16,7 @@ repos:
 
       - id: unit-tests
         name: unit tests
-        entry: uv run pytest -n4 --tb=short -q tests/
+        entry: uv run pytest --tb=short -q tests/
         language: system
         pass_filenames: false
         always_run: true

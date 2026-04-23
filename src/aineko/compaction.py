@@ -176,6 +176,23 @@ def build_compaction_prompt(messages: list[dict[str, Any]]) -> str:
     )
 
 
+def _is_fresh_user_message(m: dict[str, Any]) -> bool:
+    """True if m is a user message that does NOT carry tool_result blocks.
+
+    A tool_result wrapper is role="user" but only exists to answer a prior
+    assistant tool_use; slicing history at such a message orphans tool_use
+    ids. A fresh user turn has plain text or non-tool_result blocks.
+    """
+    if m.get("role") != "user":
+        return False
+    content = m.get("content")
+    if isinstance(content, list):
+        return not any(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+        )
+    return True
+
+
 async def compact_messages(
     messages: list[dict[str, Any]],
     kimi_client: Any,
@@ -208,13 +225,14 @@ async def compact_messages(
         return messages, None, 0
 
     # Split into old (to summarize) and recent (to keep). Walk the boundary
-    # forward until it lands on a user message so the kept window does not
-    # start mid tool_use/tool_result chain — orphaned tool_result blocks
+    # forward until it lands on a *fresh* user message so the kept window does
+    # not start mid tool_use/tool_result chain — orphaned tool_result blocks
     # reference a deleted tool_call_id and the API rejects them with
-    # "tool_call_id is not found". This may shrink the kept window below
-    # ``keep_recent``; if it consumes the whole tail, nothing is kept.
+    # "tool_call_id is not found". tool_result messages are role="user" too,
+    # so a plain role check is not enough. This may shrink the kept window
+    # below ``keep_recent``; if it consumes the whole tail, nothing is kept.
     split = len(conversation) - keep_recent
-    while split < len(conversation) and conversation[split].get("role") != "user":
+    while split < len(conversation) and not _is_fresh_user_message(conversation[split]):
         split += 1
     old_messages = conversation[:split]
     recent_messages = conversation[split:]
