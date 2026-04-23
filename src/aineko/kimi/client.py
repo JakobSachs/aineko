@@ -18,6 +18,31 @@ logger = logging.getLogger(__name__)
 DOOM_LOOP_THRESHOLD = 3
 
 
+def _history_missing_reasoning(conversation: list[dict[str, Any]]) -> bool:
+    """True if any assistant message has tool_use blocks but no thinking block.
+
+    Kimi's extended-thinking mode rejects requests whose history contains such
+    messages with `reasoning_content is missing`.
+    """
+    for m in conversation:
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        has_tool_use = any(
+            isinstance(b, dict) and b.get("type") == "tool_use" for b in content
+        )
+        if not has_tool_use:
+            continue
+        has_thinking = any(
+            isinstance(b, dict) and b.get("type") == "thinking" for b in content
+        )
+        if not has_thinking:
+            return True
+    return False
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -105,7 +130,18 @@ class KimiClient:
         }
         if system_text:
             payload["system"] = system_text
-        if self._settings.thinking:
+        thinking_enabled = self._settings.thinking
+        if thinking_enabled and _history_missing_reasoning(conversation):
+            # Kimi 400s when thinking is enabled but a prior assistant tool_use
+            # message lacks a thinking block. Disable thinking for this request
+            # so we can make forward progress; the missing reasoning is already
+            # baked into history and can't be retroactively added.
+            logger.warning(
+                "disabling thinking: history contains tool_use assistant "
+                "message without reasoning_content"
+            )
+            thinking_enabled = False
+        if thinking_enabled:
             payload["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": min(16_000, self._settings.max_tokens // 2),
@@ -420,14 +456,11 @@ class KimiClient:
                 update = await self.chat(messages, tools=None)
                 if update.content and tools.get("send_message"):
                     await tools.call("send_message", {"message": update.content})
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "text", "text": update.content or "continuing..."}
-                        ],
-                    }
+                checkpoint_blocks: list[dict[str, Any]] = list(update.thinking_blocks)
+                checkpoint_blocks.append(
+                    {"type": "text", "text": update.content or "continuing..."}
                 )
+                messages.append({"role": "assistant", "content": checkpoint_blocks})
                 rounds_since_checkpoint = 0
 
         # Hit hard ceiling
