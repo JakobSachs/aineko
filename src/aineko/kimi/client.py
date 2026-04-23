@@ -18,6 +18,41 @@ logger = logging.getLogger(__name__)
 DOOM_LOOP_THRESHOLD = 3
 
 
+def _drain_interjections(
+    messages: list[dict[str, Any]],
+    queue: "asyncio.Queue[str] | None",
+) -> None:
+    """Pull any pending user messages off the queue and inject them into history.
+
+    Merges into the trailing user message if there is one (tool_result block)
+    to avoid consecutive-user-role messages the API rejects.
+    """
+    if queue is None:
+        return
+    bodies: list[str] = []
+    while True:
+        try:
+            bodies.append(queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    if not bodies:
+        return
+    combined = "\n\n".join(f"[user interjection]: {b}" for b in bodies)
+    logger.info(
+        "injecting user interjections into turn",
+        extra={"event": "interject_inject", "count": len(bodies)},
+    )
+    if messages and messages[-1].get("role") == "user":
+        last = messages[-1]
+        existing = last.get("content")
+        if isinstance(existing, list):
+            last["content"] = existing + [{"type": "text", "text": combined}]
+        else:
+            last["content"] = f"{existing}\n\n{combined}"
+    else:
+        messages.append({"role": "user", "content": combined})
+
+
 def _history_missing_reasoning(conversation: list[dict[str, Any]]) -> bool:
     """True if any assistant message has tool_use blocks but no thinking block.
 
@@ -318,6 +353,7 @@ class KimiClient:
         checkpoint_every: int = 10,
         max_rounds: int = 100,
         on_intermediate: Callable[[str], Awaitable[None]] | None = None,
+        interject_queue: asyncio.Queue[str] | None = None,
     ) -> ChatResponse:
         """Run the chat → tool call → chat loop until the agent produces a final response."""
         tool_history: list[ToolCallRecord] = []
@@ -327,6 +363,7 @@ class KimiClient:
         dedup = MessageDeduplicator()
 
         for round_num in range(max_rounds):
+            _drain_interjections(messages, interject_queue)
             response = await self.chat(messages, tools)
 
             if not response.tool_calls:

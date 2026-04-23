@@ -29,7 +29,9 @@ from aineko.schemas.message import IncomingMessage
 
 logger = logging.getLogger(__name__)
 
-MessageHandler = Callable[[IncomingMessage], Coroutine[Any, Any, None]]
+MessageHandler = Callable[
+    [IncomingMessage, "asyncio.Queue[str]"], Coroutine[Any, Any, None]
+]
 
 _SEND_FILE_DATA_ROOT = Path("/data")
 

@@ -120,6 +120,7 @@ async def handle_message(
     bg_tasks: BackgroundTaskManager | None = None,
     compaction_keep_recent: int = 4,
     cron: CronScheduler | None = None,
+    interject_queue: "asyncio.Queue[str] | None" = None,
 ) -> None:
     """Core message handler: load session, run agent, send reply."""
     from sqlalchemy import delete as sa_delete
@@ -199,7 +200,10 @@ async def handle_message(
     # Main LLM call — no DB connection held. If it raises, scope 2 is
     # skipped and no compaction writes happen.
     response: ChatResponse = await kimi.chat_loop(
-        messages, request_tools, on_intermediate=on_intermediate
+        messages,
+        request_tools,
+        on_intermediate=on_intermediate,
+        interject_queue=interject_queue,
     )
 
     if response.content and not msg.suppress_text_response:
@@ -291,7 +295,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     cron: CronScheduler = CronScheduler()
 
     matrix.on_message(
-        lambda msg: handle_message(
+        lambda msg, interject: handle_message(
             msg,
             kimi,
             tools,
@@ -302,6 +306,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             bg_task_mgr,
             compaction_keep_recent=keep_recent,
             cron=cron,
+            interject_queue=interject,
         )
     )
 

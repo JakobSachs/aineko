@@ -234,7 +234,7 @@ async def test_result_injected_into_queue():
     """End-to-end: task result flows through inject_message into the message queue."""
     received: list[IncomingMessage] = []
 
-    async def handler(msg: IncomingMessage) -> None:
+    async def handler(msg: IncomingMessage, interject: asyncio.Queue) -> None:
         received.append(msg)
 
     q = MessageQueue(handler)

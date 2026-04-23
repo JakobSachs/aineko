@@ -37,7 +37,7 @@ async def test_single_message_delivered():
     """A single message is delivered after debounce."""
     received: list[IncomingMessage] = []
 
-    async def handler(msg: IncomingMessage) -> None:
+    async def handler(msg: IncomingMessage, interject: asyncio.Queue) -> None:
         received.append(msg)
 
     q = MessageQueue(handler)
@@ -53,7 +53,7 @@ async def test_rapid_messages_batched():
     """Multiple messages sent quickly are combined into one."""
     received: list[IncomingMessage] = []
 
-    async def handler(msg: IncomingMessage) -> None:
+    async def handler(msg: IncomingMessage, interject: asyncio.Queue) -> None:
         received.append(msg)
 
     q = MessageQueue(handler)
@@ -71,28 +71,32 @@ async def test_rapid_messages_batched():
 
 
 @pytest.mark.asyncio
-async def test_messages_during_processing_queued():
-    """Messages arriving while handler is busy are queued and processed after."""
-    received: list[IncomingMessage] = []
+async def test_text_messages_during_processing_interject():
+    """Text messages arriving while handler is busy are interjected into the
+    handler's interject queue, not re-queued as a separate turn."""
+    received_main: list[IncomingMessage] = []
+    received_interjected: list[str] = []
     handler_entered = asyncio.Event()
 
-    async def slow_handler(msg: IncomingMessage) -> None:
+    async def slow_handler(msg: IncomingMessage, interject: asyncio.Queue) -> None:
         handler_entered.set()
+        received_main.append(msg)
         await asyncio.sleep(0.1)  # simulate processing
-        received.append(msg)
+        while not interject.empty():
+            received_interjected.append(interject.get_nowait())
 
     q = MessageQueue(slow_handler)
     await q.enqueue(_msg("first"))
     await asyncio.sleep(0.03)  # debounce fires
     await handler_entered.wait()
 
-    # Send another while handler is busy
+    # Send another while handler is busy — should interject, not re-queue.
     await q.enqueue(_msg("while busy"))
     await asyncio.sleep(0.3)  # wait for everything
 
-    assert len(received) == 2
-    assert received[0].body == "first"
-    assert received[1].body == "while busy"
+    assert len(received_main) == 1
+    assert received_main[0].body == "first"
+    assert received_interjected == ["while busy"]
 
 
 @pytest.mark.asyncio
@@ -101,7 +105,7 @@ async def test_messages_share_single_queue():
     regardless of msg.room_id — there is no per-room partitioning anymore."""
     received: list[IncomingMessage] = []
 
-    async def handler(msg: IncomingMessage) -> None:
+    async def handler(msg: IncomingMessage, interject: asyncio.Queue) -> None:
         received.append(msg)
 
     q = MessageQueue(handler)
@@ -156,12 +160,15 @@ class TestQueueProperties:
     @hsettings(max_examples=20, deadline=None)
     @pytest.mark.asyncio
     async def test_no_messages_lost(self, handler_ms: int, delays: list[int]):
-        """Every enqueued body appears in exactly one handler call."""
+        """Every enqueued body surfaces either in a handler call or via interjection."""
         received: list[IncomingMessage] = []
+        interjected: list[str] = []
 
-        async def handler(msg: IncomingMessage) -> None:
+        async def handler(msg: IncomingMessage, interject: asyncio.Queue) -> None:
             await asyncio.sleep(handler_ms / 1000)
             received.append(msg)
+            while not interject.empty():
+                interjected.append(interject.get_nowait())
 
         q = MessageQueue(handler)
         expected: set[str] = set()
@@ -174,7 +181,7 @@ class TestQueueProperties:
         budget = (_TEST_DEBOUNCE_MS + handler_ms) * len(delays) + 200
         await asyncio.sleep(budget / 1000)
 
-        assert _extract_bodies(received) == expected
+        assert _extract_bodies(received) | set(interjected) == expected
 
     @given(
         handler_ms=_handler_ms,
@@ -187,7 +194,7 @@ class TestQueueProperties:
         max_concurrent = 0
         concurrent = 0
 
-        async def handler(msg: IncomingMessage) -> None:
+        async def handler(msg: IncomingMessage, interject: asyncio.Queue) -> None:
             nonlocal concurrent, max_concurrent
             concurrent += 1
             max_concurrent = max(max_concurrent, concurrent)
@@ -211,12 +218,18 @@ class TestQueueProperties:
     @hsettings(max_examples=20, deadline=None)
     @pytest.mark.asyncio
     async def test_arrival_order_preserved(self, handler_ms: int, delays: list[int]):
-        """Within each handler call, messages appear in arrival order."""
-        received: list[IncomingMessage] = []
+        """Messages (across handler calls + interjections) surface in arrival order."""
+        flat: list[str] = []
 
-        async def handler(msg: IncomingMessage) -> None:
+        async def handler(msg: IncomingMessage, interject: asyncio.Queue) -> None:
+            matches = re.findall(r"\[message \d+\]: (.+)", msg.body)
+            if matches:
+                flat.extend(matches)
+            else:
+                flat.append(msg.body)
             await asyncio.sleep(handler_ms / 1000)
-            received.append(msg)
+            while not interject.empty():
+                flat.append(interject.get_nowait())
 
         q = MessageQueue(handler)
         order: list[str] = []
@@ -229,7 +242,7 @@ class TestQueueProperties:
         budget = (_TEST_DEBOUNCE_MS + handler_ms) * len(delays) + 200
         await asyncio.sleep(budget / 1000)
 
-        assert _extract_bodies_ordered(received) == order
+        assert flat == order
 
 
 # ---------------------------------------------------------------------------
@@ -239,18 +252,23 @@ class TestQueueProperties:
 
 @pytest.mark.asyncio
 async def test_message_during_slow_handler_not_lost():
-    """Message arriving while a slow handler runs must not cancel the handler.
+    """Messages arriving while a slow handler runs must not cancel it, and
+    must surface to the handler — either as interjections (text) or a
+    follow-up drain (images, never interjected).
 
     Regression for: enqueue() cancelled the debounce task while it was already
     past the sleep phase and running _drain → the in-flight LLM request was killed.
     """
-    received: list[IncomingMessage] = []
+    seen: list[str] = []
     handler_entered = asyncio.Event()
 
-    async def slow_handler(msg: IncomingMessage) -> None:
+    async def slow_handler(msg: IncomingMessage, interject: asyncio.Queue) -> None:
         handler_entered.set()
         await asyncio.sleep(0.1)  # simulate LLM call
-        received.append(msg)
+        matches = re.findall(r"\[message \d+\]: (.+)", msg.body)
+        seen.extend(matches if matches else [msg.body])
+        while not interject.empty():
+            seen.append(interject.get_nowait())
 
     q = MessageQueue(slow_handler)
 
@@ -258,11 +276,11 @@ async def test_message_during_slow_handler_not_lost():
     await asyncio.sleep(0.03)  # debounce fires
     await handler_entered.wait()
 
-    # Send two more while handler is busy
+    # Send two more while handler is busy — these interject into the live turn.
     await q.enqueue(_msg("second"))
     await asyncio.sleep(0.01)
     await q.enqueue(_msg("third"))
 
     await asyncio.sleep(0.5)
 
-    assert _extract_bodies(received) == {"first", "second", "third"}
+    assert set(seen) == {"first", "second", "third"}
