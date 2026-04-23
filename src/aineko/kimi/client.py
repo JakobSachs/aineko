@@ -359,6 +359,14 @@ class KimiClient:
             # Execute tool calls and collect results
             tool_results: list[tuple[str, str, bool]] = []
 
+            # When the model batches multiple send_message calls in one
+            # response, they'd otherwise land back-to-back with no breathing
+            # room. Space them out so the user sees a conversation, not a wall.
+            send_message_count = sum(
+                1 for tc in response.tool_calls if tc.name == "send_message"
+            )
+            seen_send_messages = 0
+
             for tc in response.tool_calls:
                 args_json = json.dumps(tc.arguments, sort_keys=True)
 
@@ -385,6 +393,12 @@ class KimiClient:
                             ToolCallRecord(tc.name, args_json, error_msg)
                         )
                         continue
+
+                # Space out batched send_messages (skip delay on the first).
+                if tc.name == "send_message":
+                    seen_send_messages += 1
+                    if send_message_count > 1 and seen_send_messages > 1:
+                        await asyncio.sleep(1.5)
 
                 # Deduplicate send_message calls
                 if tc.name == "send_message":
