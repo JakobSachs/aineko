@@ -243,22 +243,32 @@ async def persist_response(
                     )
                 )
             elif api_role == "user":
-                # Distinguish tool_result-bearing user messages (which the
-                # loop emits internally) from any user-text injected via
-                # interjections or checkpoints. Only the former should be
-                # persisted as TOOL rows; checkpoint user prompts and
-                # interjections are transient and shouldn't be saved.
+                # A user turn produced inside chat_loop is one of:
+                # (a) tool_result blocks paired with the previous assistant
+                #     tool_use — must be persisted to keep the API contract;
+                # (b) a checkpoint "Progress check" prompt — transient;
+                # (c) a pure interjection appended when the trailing message
+                #     was not a tool_result user — also transient.
+                # Interjections can also be appended onto a tool_result
+                # message as extra `text` blocks; in that case the message
+                # is still (a) and must be persisted with the mixed content
+                # intact, or replay sees an orphan tool_use → 400.
+                has_tool_result = any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in content_blocks
+                )
+                if not has_tool_result:
+                    continue
                 clipped: list[dict[str, Any]] = []
                 for b in content_blocks:
-                    if not isinstance(b, dict) or b.get("type") != "tool_result":
-                        clipped = []
-                        break
+                    if not isinstance(b, dict):
+                        continue
                     nb = dict(b)
-                    if isinstance(nb.get("content"), str):
+                    if nb.get("type") == "tool_result" and isinstance(
+                        nb.get("content"), str
+                    ):
                         nb["content"] = nb["content"][:2000]
                     clipped.append(nb)
-                if not clipped:
-                    continue
                 db.add(
                     Message(
                         session_id=session_id,
