@@ -104,6 +104,12 @@ class ChatResponse:
     finish_reason: str = ""
     tool_history: list[ToolCallRecord] = field(default_factory=list)
     intermediate_messages: list[str] = field(default_factory=list)
+    # API-shape message dicts produced during chat_loop, in order: each
+    # assistant turn (with thinking + tool_use blocks) followed by its
+    # paired tool_result user turn, ending with the final assistant turn.
+    # Used by handler.persist_response to write blocks to DB so thinking
+    # blocks survive replay.
+    new_messages: list[dict[str, Any]] = field(default_factory=list)
 
 
 class KimiClient:
@@ -361,6 +367,7 @@ class KimiClient:
         recent_calls: list[tuple[str, str]] = []
         rounds_since_checkpoint = 0
         dedup = MessageDeduplicator()
+        start_len = len(messages)
 
         for round_num in range(max_rounds):
             _drain_interjections(messages, interject_queue)
@@ -369,6 +376,15 @@ class KimiClient:
             if not response.tool_calls:
                 response.tool_history = tool_history
                 response.intermediate_messages = intermediate_messages
+                # Final assistant turn isn't appended to `messages` by the
+                # loop — synthesize an entry so persistence captures the
+                # thinking blocks alongside the final text.
+                final_blocks = self._build_assistant_content(response)
+                response.new_messages = list(messages[start_len:])
+                if final_blocks:
+                    response.new_messages.append(
+                        {"role": "assistant", "content": final_blocks}
+                    )
                 return response
 
             # Don't stream pre-tool text to the user: when content arrives
@@ -524,6 +540,10 @@ class KimiClient:
         )
         final = await self.chat(messages, tools=None)
         final.tool_history = tool_history
+        final_blocks = self._build_assistant_content(final)
+        final.new_messages = list(messages[start_len:])
+        if final_blocks:
+            final.new_messages.append({"role": "assistant", "content": final_blocks})
         return final
 
     async def close(self) -> None:

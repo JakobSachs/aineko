@@ -155,6 +155,14 @@ async def load_conversation(
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
     for m in history:
+        # New canonical path: blocks column holds API-shape content.
+        if m.blocks is not None:
+            api_role = "user" if m.role == Role.TOOL else m.role.value.lower()
+            messages.append({"role": api_role, "content": m.blocks})
+            continue
+        # Legacy path: pre-0003 sentinel rows. Kept so code works during
+        # the brief window between deploy and migration apply, and as a
+        # fallback if any row slipped through.
         if m.role == Role.ASSISTANT and m.tool_name == "__has_tool_calls__":
             try:
                 blocks = json.loads(m.content)
@@ -213,8 +221,56 @@ async def persist_response(
     sent_messages: list[str],
 ) -> None:
     """Save the assistant response and tool logs to DB."""
-    if response.tool_history:
-        # Assistant message with tool call blocks
+    new_messages = getattr(response, "new_messages", None)
+    if isinstance(new_messages, list) and new_messages:
+        # Persist the exact API-shape turns that chat_loop produced. blocks
+        # is the canonical column; content holds a JSON dump for legacy
+        # search_chat readers. Tool_result content blocks are clipped to
+        # 2000 chars to keep DB row size bounded (matches prior behavior).
+        for m in new_messages:
+            content_blocks = m.get("content")
+            if not isinstance(content_blocks, list):
+                continue
+            api_role = m.get("role")
+            if api_role == "assistant":
+                db.add(
+                    Message(
+                        session_id=session_id,
+                        role=Role.ASSISTANT,
+                        content=json.dumps(content_blocks),
+                        blocks=content_blocks,
+                        token_count=response.usage.get("total_tokens"),
+                    )
+                )
+            elif api_role == "user":
+                # Distinguish tool_result-bearing user messages (which the
+                # loop emits internally) from any user-text injected via
+                # interjections or checkpoints. Only the former should be
+                # persisted as TOOL rows; checkpoint user prompts and
+                # interjections are transient and shouldn't be saved.
+                clipped: list[dict[str, Any]] = []
+                for b in content_blocks:
+                    if not isinstance(b, dict) or b.get("type") != "tool_result":
+                        clipped = []
+                        break
+                    nb = dict(b)
+                    if isinstance(nb.get("content"), str):
+                        nb["content"] = nb["content"][:2000]
+                    clipped.append(nb)
+                if not clipped:
+                    continue
+                db.add(
+                    Message(
+                        session_id=session_id,
+                        role=Role.TOOL,
+                        content=json.dumps(clipped),
+                        blocks=clipped,
+                    )
+                )
+    elif response.tool_history:
+        # Legacy path retained for any caller not yet on the new
+        # ChatResponse contract. New code should always populate
+        # new_messages via chat_loop.
         assistant_blocks: list[dict[str, Any]] = []
         for sm in sent_messages:
             assistant_blocks.append({"type": "text", "text": sm})
@@ -235,12 +291,12 @@ async def persist_response(
                 session_id=session_id,
                 role=Role.ASSISTANT,
                 content=json.dumps(assistant_blocks),
+                blocks=assistant_blocks,
                 token_count=response.usage.get("total_tokens"),
                 tool_name="__has_tool_calls__",
             )
         )
 
-        # Tool results
         result_blocks: list[dict[str, Any]] = []
         for rec in response.tool_history:
             result_blocks.append(
@@ -255,6 +311,7 @@ async def persist_response(
                 session_id=session_id,
                 role=Role.TOOL,
                 content=json.dumps(result_blocks),
+                blocks=result_blocks,
                 tool_name="__tool_results__",
             )
         )

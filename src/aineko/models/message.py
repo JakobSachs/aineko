@@ -5,6 +5,7 @@ import json as _json
 from datetime import datetime
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from aineko.db import Base
@@ -42,6 +43,7 @@ class Message(Base):
     session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id"), index=True)
     role: Mapped[Role] = mapped_column(Enum(Role))
     content: Mapped[str] = mapped_column(Text)
+    blocks: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
     tool_call_id: Mapped[str | None] = mapped_column(String, nullable=True)
     tool_name: Mapped[str | None] = mapped_column(String, nullable=True)
     token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

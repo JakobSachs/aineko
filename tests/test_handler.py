@@ -594,3 +594,151 @@ class TestPersistResponse:
             )
         )
         assert result.scalar_one_or_none() is None
+
+
+# --- new_messages round-trip ---
+
+
+class TestNewMessagesRoundTrip:
+    """End-to-end: chat_loop produces blocks-with-thinking → persist → load
+    → assert thinking blocks reappear in replayed messages.
+
+    Regression for the hallucination caused by stripped thinking blocks
+    tripping kimi.client._history_missing_reasoning.
+    """
+
+    @pytest.mark.asyncio
+    async def test_thinking_blocks_survive_persist_and_load(self, db, msg):
+        from aineko.handler import load_conversation, persist_response
+        from aineko.kimi.client import _history_missing_reasoning
+
+        s = Session(room_id="!room:test")
+        db.add(s)
+        await db.flush()
+        user_msg = Message(session_id=s.id, role=Role.USER, content="hi")
+        db.add(user_msg)
+        await db.flush()
+
+        # Simulate what chat_loop appends across one tool round + final.
+        new_messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "i should grep for it",
+                        "signature": "sig-1",
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "grep",
+                        "input": {"pattern": "x"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": "match",
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "found it, replying",
+                        "signature": "sig-2",
+                    },
+                    {"type": "text", "text": "found it"},
+                ],
+            },
+        ]
+
+        response = MagicMock()
+        response.content = "found it"
+        response.tool_history = []
+        response.new_messages = new_messages
+        response.usage = {"total_tokens": 123}
+
+        await persist_response(db, s.id, user_msg.id, response, sent_messages=[])
+
+        # New incoming user msg triggers replay.
+        next_msg = IncomingMessage(
+            room_id="!room:test",
+            sender="@user:test",
+            body="and then?",
+            event_id="$evt2",
+            timestamp=datetime.now(timezone.utc),
+        )
+        _, _, replayed = await load_conversation(db, next_msg, system_prompt="sys")
+
+        # Drop the system prompt; everything else is the conversation.
+        convo = [m for m in replayed if m.get("role") != "system"]
+
+        # Must NOT trigger the thinking-disable guard — every assistant
+        # message with tool_use carries a thinking block.
+        assert not _history_missing_reasoning(convo), (
+            "history-missing-reasoning guard tripped: "
+            f"{json.dumps(convo, default=str)[:500]}"
+        )
+
+        # Spot-check: the assistant tool turn round-trips with both blocks.
+        tool_turn = next(
+            m
+            for m in convo
+            if m["role"] == "assistant"
+            and isinstance(m["content"], list)
+            and any(b.get("type") == "tool_use" for b in m["content"])
+        )
+        types = [b["type"] for b in tool_turn["content"]]
+        assert "thinking" in types
+        assert "tool_use" in types
+
+    @pytest.mark.asyncio
+    async def test_legacy_sentinel_rows_still_replay(self, db, msg):
+        """Pre-0003 rows have blocks=NULL. load_conversation must still
+        decode them via the legacy fallback path so we keep working
+        through the deploy/migration window."""
+        from aineko.handler import load_conversation
+
+        s = Session(room_id="!room:test")
+        db.add(s)
+        await db.flush()
+
+        legacy_blocks = [{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]
+        db.add(
+            Message(
+                session_id=s.id,
+                role=Role.ASSISTANT,
+                content=json.dumps(legacy_blocks),
+                tool_name="__has_tool_calls__",
+            )
+        )
+        db.add(
+            Message(
+                session_id=s.id,
+                role=Role.TOOL,
+                content=json.dumps(
+                    [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]
+                ),
+                tool_name="__tool_results__",
+            )
+        )
+        await db.flush()
+
+        _, _, messages = await load_conversation(db, msg, system_prompt="sys")
+        roles_with_blocks = [m for m in messages if isinstance(m["content"], list)]
+        assert any(
+            any(b.get("type") == "tool_use" for b in m["content"])
+            for m in roles_with_blocks
+        )
+        assert any(
+            any(b.get("type") == "tool_result" for b in m["content"])
+            for m in roles_with_blocks
+        )
