@@ -16,9 +16,11 @@ from nio import (
     MatrixRoom,
     MegolmEvent,
     RoomKeyRequest,
+    RoomMessageAudio,
     RoomMessageFile,
     RoomMessageImage,
     RoomMessageText,
+    RoomMessageVideo,
 )
 
 import mimetypes
@@ -226,6 +228,8 @@ class MatrixConnector:
         self._client.add_event_callback(self._on_room_message, RoomMessageText)
         self._client.add_event_callback(self._on_room_file, RoomMessageFile)
         self._client.add_event_callback(self._on_room_file, RoomMessageImage)
+        self._client.add_event_callback(self._on_room_file, RoomMessageAudio)
+        self._client.add_event_callback(self._on_room_file, RoomMessageVideo)
 
         # Auto-join any pending invites — only when no owner is configured.
         # When owner is set we can't easily verify the inviter from the bulk
@@ -439,7 +443,9 @@ class MatrixConnector:
         return body
 
     async def _on_room_file(
-        self, room: MatrixRoom, event: RoomMessageFile | RoomMessageImage
+        self,
+        room: MatrixRoom,
+        event: RoomMessageFile | RoomMessageImage | RoomMessageAudio | RoomMessageVideo,
     ) -> None:
         """Handle file/image uploads — download, save, and pass to handler."""
         if (
