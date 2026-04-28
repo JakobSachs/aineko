@@ -602,15 +602,28 @@ class TestPersistResponse:
 class TestNewMessagesRoundTrip:
     """End-to-end: chat_loop produces blocks-with-thinking → persist → load
     → assert thinking blocks reappear in replayed messages.
-
-    Regression for the hallucination caused by stripped thinking blocks
-    tripping kimi.client._history_missing_reasoning.
     """
 
     @pytest.mark.asyncio
     async def test_thinking_blocks_survive_persist_and_load(self, db, msg):
         from aineko.handler import load_conversation, persist_response
-        from aineko.kimi.client import _history_missing_reasoning
+
+        def _history_missing_reasoning(conversation):
+            for m in conversation:
+                if m.get("role") != "assistant":
+                    continue
+                content = m.get("content")
+                if not isinstance(content, list):
+                    continue
+                has_tool_use = any(
+                    b.get("type") == "tool_use" for b in content if isinstance(b, dict)
+                )
+                has_thinking = any(
+                    b.get("type") == "thinking" for b in content if isinstance(b, dict)
+                )
+                if has_tool_use and not has_thinking:
+                    return True
+            return False
 
         s = Session(room_id="!room:test")
         db.add(s)

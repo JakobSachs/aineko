@@ -55,31 +55,6 @@ def _drain_interjections(
         )
 
 
-def _history_missing_reasoning(conversation: list[dict[str, Any]]) -> bool:
-    """True if any assistant message has tool_use blocks but no thinking block.
-
-    Kimi's extended-thinking mode rejects requests whose history contains such
-    messages with `reasoning_content is missing`.
-    """
-    for m in conversation:
-        if m.get("role") != "assistant":
-            continue
-        content = m.get("content")
-        if not isinstance(content, list):
-            continue
-        has_tool_use = any(
-            isinstance(b, dict) and b.get("type") == "tool_use" for b in content
-        )
-        if not has_tool_use:
-            continue
-        has_thinking = any(
-            isinstance(b, dict) and b.get("type") == "thinking" for b in content
-        )
-        if not has_thinking:
-            return True
-    return False
-
-
 @dataclass
 class ToolCall:
     id: str
@@ -174,16 +149,6 @@ class KimiClient:
         if system_text:
             payload["system"] = system_text
         thinking_enabled = self._settings.thinking
-        if thinking_enabled and _history_missing_reasoning(conversation):
-            # Kimi 400s when thinking is enabled but a prior assistant tool_use
-            # message lacks a thinking block. Disable thinking for this request
-            # so we can make forward progress; the missing reasoning is already
-            # baked into history and can't be retroactively added.
-            logger.warning(
-                "disabling thinking: history contains tool_use assistant "
-                "message without reasoning_content"
-            )
-            thinking_enabled = False
         if thinking_enabled:
             payload["thinking"] = {
                 "type": "enabled",
