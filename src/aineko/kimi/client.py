@@ -369,182 +369,207 @@ class KimiClient:
         dedup = MessageDeduplicator()
         start_len = len(messages)
 
-        for round_num in range(max_rounds):
-            _drain_interjections(messages, interject_queue)
-            response = await self.chat(messages, tools)
+        # Outer loop wraps the round-runner so there is exactly *one* exit
+        # gate. Anything that wants to leave chat_loop must pass through the
+        # interjection check at the bottom — making it structurally impossible
+        # to return while a user message is still pending in the queue.
+        round_num = 0
+        while True:
+            pending: ChatResponse | None = None
 
-            if not response.tool_calls:
-                response.tool_history = tool_history
-                response.intermediate_messages = intermediate_messages
-                # Final assistant turn isn't appended to `messages` by the
-                # loop — synthesize an entry so persistence captures the
-                # thinking blocks alongside the final text.
-                final_blocks = self._build_assistant_content(response)
-                response.new_messages = list(messages[start_len:])
-                if final_blocks:
-                    response.new_messages.append(
-                        {"role": "assistant", "content": final_blocks}
+            while round_num < max_rounds:
+                _drain_interjections(messages, interject_queue)
+                response = await self.chat(messages, tools)
+                round_num += 1
+
+                if not response.tool_calls:
+                    pending = response
+                    break
+
+                # Don't stream pre-tool text to the user: when content arrives
+                # alongside tool_use, it's a preamble the model wrote before any
+                # tool ran, and has been observed to contain hallucinated
+                # tool-result-shaped output. The real answer lands after tools
+                # finish, in the no-tool-calls branch above.
+                if response.content:
+                    logger.info(
+                        "discarding pre-tool content",
+                        extra={
+                            "event": "pretool_content_discarded",
+                            "preview": response.content[:200],
+                        },
                     )
-                return response
 
-            # Don't stream pre-tool text to the user: when content arrives
-            # alongside tool_use, it's a preamble the model wrote before any
-            # tool ran, and has been observed to contain hallucinated
-            # tool-result-shaped output. The real answer lands after tools
-            # finish, in the no-tool-calls branch above.
-            if response.content:
-                logger.info(
-                    "discarding pre-tool content",
-                    extra={
-                        "event": "pretool_content_discarded",
-                        "preview": response.content[:200],
-                    },
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": self._build_assistant_content(response),
+                    }
                 )
 
-            # Append assistant message with content blocks
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": self._build_assistant_content(response),
-                }
-            )
+                tool_results: list[tuple[str, str, bool]] = []
 
-            # Execute tool calls and collect results
-            tool_results: list[tuple[str, str, bool]] = []
-
-            # When the model batches multiple send_message calls in one
-            # response, they'd otherwise land back-to-back with no breathing
-            # room. Space them out so the user sees a conversation, not a wall.
-            send_message_count = sum(
-                1 for tc in response.tool_calls if tc.name == "send_message"
-            )
-            seen_send_messages = 0
-
-            for tc in response.tool_calls:
-                args_json = json.dumps(tc.arguments, sort_keys=True)
-
-                # Doom loop detection
-                recent_calls.append((tc.name, args_json))
-                if len(recent_calls) >= DOOM_LOOP_THRESHOLD:
-                    tail = recent_calls[-DOOM_LOOP_THRESHOLD:]
-                    if all(t == tail[0] for t in tail):
-                        logger.warning(
-                            "doom loop detected",
-                            extra={
-                                "event": "doom_loop",
-                                "tool": tc.name,
-                                "tool_args": tc.arguments,
-                            },
-                        )
-                        error_msg = (
-                            f"Error: doom loop detected — you called {tc.name} with "
-                            f"identical arguments {DOOM_LOOP_THRESHOLD} times in a row. "
-                            f"Try a different approach."
-                        )
-                        tool_results.append((tc.id, error_msg, True))
-                        tool_history.append(
-                            ToolCallRecord(tc.name, args_json, error_msg)
-                        )
-                        continue
-
-                # Space out batched send_messages (skip delay on the first).
-                if tc.name == "send_message":
-                    seen_send_messages += 1
-                    if send_message_count > 1 and seen_send_messages > 1:
-                        await asyncio.sleep(1.5)
-
-                # Deduplicate send_message calls
-                if tc.name == "send_message":
-                    msg_text = tc.arguments.get("message", "")
-                    if dedup.is_duplicate(msg_text):
-                        logger.info(
-                            "skipping duplicate send_message",
-                            extra={"event": "send_dedup", "tool": tc.name},
-                        )
-                        result = "sent (deduplicated)"
-                        tool_results.append((tc.id, result, False))
-                        tool_history.append(ToolCallRecord(tc.name, args_json, result))
-                        continue
-
-                logger.info(
-                    "tool call",
-                    extra={
-                        "event": "tool_call",
-                        "tool": tc.name,
-                        "tool_args": tc.arguments,
-                    },
+                # When the model batches multiple send_message calls in one
+                # response, they'd otherwise land back-to-back with no breathing
+                # room. Space them out so the user sees a conversation, not a wall.
+                send_message_count = sum(
+                    1 for tc in response.tool_calls if tc.name == "send_message"
                 )
-                result = await tools.call(tc.name, tc.arguments)
-                result_str = result if isinstance(result, str) else "[content blocks]"
-                tool_history.append(ToolCallRecord(tc.name, args_json, result_str))
+                seen_send_messages = 0
 
-                # Track successful send_message for dedup
-                if tc.name == "send_message":
-                    dedup.track_sent(tc.arguments.get("message", ""))
-                logger.info(
-                    "tool result",
-                    extra={
-                        "event": "tool_result",
-                        "tool": tc.name,
-                        "result_len": (
-                            len(result) if isinstance(result, str) else len(result)
-                        ),
-                        "result_preview": (
-                            result[:200]
-                            if isinstance(result, str)
-                            else str(result[0])[:200]
-                        ),
-                    },
-                )
-                tool_results.append((tc.id, result, False))
+                for tc in response.tool_calls:
+                    args_json = json.dumps(tc.arguments, sort_keys=True)
 
-            # Append tool results as a single user message with tool_result blocks
-            messages.append(self._build_tool_results(tool_results))
+                    recent_calls.append((tc.name, args_json))
+                    if len(recent_calls) >= DOOM_LOOP_THRESHOLD:
+                        tail = recent_calls[-DOOM_LOOP_THRESHOLD:]
+                        if all(t == tail[0] for t in tail):
+                            logger.warning(
+                                "doom loop detected",
+                                extra={
+                                    "event": "doom_loop",
+                                    "tool": tc.name,
+                                    "tool_args": tc.arguments,
+                                },
+                            )
+                            error_msg = (
+                                f"Error: doom loop detected — you called {tc.name} with "
+                                f"identical arguments {DOOM_LOOP_THRESHOLD} times in a row. "
+                                f"Try a different approach."
+                            )
+                            tool_results.append((tc.id, error_msg, True))
+                            tool_history.append(
+                                ToolCallRecord(tc.name, args_json, error_msg)
+                            )
+                            continue
 
-            rounds_since_checkpoint += 1
+                    if tc.name == "send_message":
+                        seen_send_messages += 1
+                        if send_message_count > 1 and seen_send_messages > 1:
+                            await asyncio.sleep(1.5)
 
-            # Checkpoint: force progress update
-            if rounds_since_checkpoint >= checkpoint_every:
-                logger.info(
-                    "checkpoint: requesting progress update (round %d)",
-                    round_num + 1,
-                    extra={"event": "checkpoint", "round": round_num + 1},
+                    if tc.name == "send_message":
+                        msg_text = tc.arguments.get("message", "")
+                        if dedup.is_duplicate(msg_text):
+                            logger.info(
+                                "skipping duplicate send_message",
+                                extra={"event": "send_dedup", "tool": tc.name},
+                            )
+                            result = "sent (deduplicated)"
+                            tool_results.append((tc.id, result, False))
+                            tool_history.append(
+                                ToolCallRecord(tc.name, args_json, result)
+                            )
+                            continue
+
+                    logger.info(
+                        "tool call",
+                        extra={
+                            "event": "tool_call",
+                            "tool": tc.name,
+                            "tool_args": tc.arguments,
+                        },
+                    )
+                    result = await tools.call(tc.name, tc.arguments)
+                    result_str = (
+                        result if isinstance(result, str) else "[content blocks]"
+                    )
+                    tool_history.append(ToolCallRecord(tc.name, args_json, result_str))
+
+                    if tc.name == "send_message":
+                        dedup.track_sent(tc.arguments.get("message", ""))
+                    logger.info(
+                        "tool result",
+                        extra={
+                            "event": "tool_result",
+                            "tool": tc.name,
+                            "result_len": (
+                                len(result) if isinstance(result, str) else len(result)
+                            ),
+                            "result_preview": (
+                                result[:200]
+                                if isinstance(result, str)
+                                else str(result[0])[:200]
+                            ),
+                        },
+                    )
+                    tool_results.append((tc.id, result, False))
+
+                messages.append(self._build_tool_results(tool_results))
+
+                rounds_since_checkpoint += 1
+
+                if rounds_since_checkpoint >= checkpoint_every:
+                    logger.info(
+                        "checkpoint: requesting progress update (round %d)",
+                        round_num,
+                        extra={"event": "checkpoint", "round": round_num},
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Progress check — you've been working for a while. "
+                                "Send the user a brief status update on what you've done "
+                                "and what's left, then continue working."
+                            ),
+                        }
+                    )
+                    update = await self.chat(messages, tools=None)
+                    if update.content and tools.get("send_message"):
+                        await tools.call("send_message", {"message": update.content})
+                    checkpoint_blocks: list[dict[str, Any]] = list(
+                        update.thinking_blocks
+                    )
+                    checkpoint_blocks.append(
+                        {"type": "text", "text": update.content or "continuing..."}
+                    )
+                    messages.append({"role": "assistant", "content": checkpoint_blocks})
+                    rounds_since_checkpoint = 0
+
+            # Inner loop exited: either via `break` (model produced no tool
+            # calls → `pending` is set) or by exhausting `max_rounds`.
+            if pending is None:
+                logger.warning(
+                    "hit max tool rounds (%d), forcing final response", max_rounds
                 )
                 messages.append(
                     {
                         "role": "user",
                         "content": (
-                            "Progress check — you've been working for a while. "
-                            "Send the user a brief status update on what you've done "
-                            "and what's left, then continue working."
+                            "You've reached the maximum tool call limit. "
+                            "Summarize what you've done so far and respond to the user now."
                         ),
                     }
                 )
-                update = await self.chat(messages, tools=None)
-                if update.content and tools.get("send_message"):
-                    await tools.call("send_message", {"message": update.content})
-                checkpoint_blocks: list[dict[str, Any]] = list(update.thinking_blocks)
-                checkpoint_blocks.append(
-                    {"type": "text", "text": update.content or "continuing..."}
-                )
-                messages.append({"role": "assistant", "content": checkpoint_blocks})
-                rounds_since_checkpoint = 0
+                pending = await self.chat(messages, tools=None)
 
-        # Hit hard ceiling
-        logger.warning("hit max tool rounds (%d), forcing final response", max_rounds)
-        messages.append(
-            {
-                "role": "user",
-                "content": "You've reached the maximum tool call limit. Summarize what you've done so far and respond to the user now.",
-            }
-        )
-        final = await self.chat(messages, tools=None)
-        final.tool_history = tool_history
-        final_blocks = self._build_assistant_content(final)
-        final.new_messages = list(messages[start_len:])
-        if final_blocks:
-            final.new_messages.append({"role": "assistant", "content": final_blocks})
-        return final
+            # ---- single exit gate ----
+            # If a user message landed in the interject queue while we were
+            # awaiting the LLM, don't return — commit the assistant turn and
+            # loop back so the next round picks up the interjection via
+            # `_drain_interjections`. Bump max_rounds so we don't immediately
+            # trip the ceiling on a fresh user message.
+            if interject_queue is not None and not interject_queue.empty():
+                logger.info(
+                    "interjection arrived during exit, re-entering loop",
+                    extra={"event": "interject_at_exit"},
+                )
+                pending_blocks = self._build_assistant_content(pending)
+                if pending_blocks:
+                    messages.append({"role": "assistant", "content": pending_blocks})
+                max_rounds = round_num + max_rounds
+                continue
+
+            pending.tool_history = tool_history
+            pending.intermediate_messages = intermediate_messages
+            final_blocks = self._build_assistant_content(pending)
+            pending.new_messages = list(messages[start_len:])
+            if final_blocks:
+                pending.new_messages.append(
+                    {"role": "assistant", "content": final_blocks}
+                )
+            return pending
 
     async def close(self) -> None:
         await self._http.aclose()

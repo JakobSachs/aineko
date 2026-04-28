@@ -1,5 +1,7 @@
 """Tests for Anthropic Messages API format (Kimi Coding endpoint)."""
 
+import asyncio
+
 import pytest
 from unittest.mock import MagicMock
 
@@ -415,3 +417,133 @@ class TestToolResultFormat:
         assert isinstance(content, list)
         types = [block["type"] for block in content]
         assert "tool_use" in types
+
+
+# --- Interjection during final (end_turn) response ---
+
+
+class TestInterjectionRace:
+    """Regression: a user message that lands in the interject queue while the
+    LLM is producing its final (no-tool-calls) response must not be silently
+    dropped on the floor when chat_loop returns.
+
+    Real-world incident (2026-04-28 09:59:56): user sent a message ~100ms
+    before the final end_turn arrived; queue.py logged `interject_enqueue`,
+    but the agent never addressed it because chat_loop only drains the queue
+    at the *start* of each round.
+    """
+
+    @pytest.mark.asyncio
+    async def test_interject_during_final_turn_is_not_dropped(self):
+        client = KimiClient(_make_settings())
+        messages: list[dict] = [{"role": "user", "content": "thanks"}]
+
+        interject_queue: asyncio.Queue[str] = asyncio.Queue()
+        call_count = 0
+
+        async def mock_chat(msgs, tools=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Simulate the LLM producing a final response while a user
+                # message arrives in the interject queue mid-flight.
+                interject_queue.put_nowait("Can ya help me make a list")
+                # tiny await so the put_nowait settles like a real race
+                await asyncio.sleep(0)
+                return ChatResponse(
+                    content="safe travels tomorrow",
+                    finish_reason="end_turn",
+                )
+            # If the loop correctly re-runs after seeing the interjection,
+            # this second call is what addresses the new user message.
+            return ChatResponse(
+                content="sure, what are you packing?",
+                finish_reason="end_turn",
+            )
+
+        client.chat = mock_chat
+        registry = ToolRegistry()
+
+        await client.chat_loop(messages, registry, interject_queue=interject_queue)
+
+        # The interjection must have been consumed (not stranded in the queue).
+        assert (
+            interject_queue.empty()
+        ), "interjection left in queue — message was dropped on end_turn"
+
+        # And the LLM must have been given a chance to actually respond to it:
+        # either by re-running the loop, or by some equivalent mechanism that
+        # surfaces the user's text into the conversation.
+        all_user_text = " ".join(
+            (m["content"] if isinstance(m["content"], str) else "")
+            for m in messages
+            if m.get("role") == "user"
+        )
+        assert "Can ya help me make a list" in all_user_text or call_count >= 2, (
+            "interjected message was never injected into history nor triggered "
+            "a follow-up LLM round"
+        )
+
+    @pytest.mark.asyncio
+    async def test_interject_during_max_rounds_final_call_is_not_dropped(self):
+        """Same race, but on the max_rounds exit path: the forced final
+        `chat(...)` at the bottom of the loop also runs while interjections
+        can land. That exit must go through the same gate."""
+        client = KimiClient(_make_settings())
+        messages: list[dict] = [{"role": "user", "content": "do stuff"}]
+        interject_queue: asyncio.Queue[str] = asyncio.Queue()
+
+        call_count = 0
+        forced_final_round = False
+        interjected_once = False
+
+        async def mock_chat(msgs, tools=None):
+            nonlocal call_count, forced_final_round, interjected_once
+            call_count += 1
+            # Keep emitting tool calls until we hit max_rounds → forces the
+            # "summarize now" path. tools=None signals the forced final call.
+            if tools is None:
+                forced_final_round = True
+                if not interjected_once:
+                    interject_queue.put_nowait("wait one more thing")
+                    interjected_once = True
+                    await asyncio.sleep(0)
+                return ChatResponse(content="summary", finish_reason="end_turn")
+            return ChatResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id=f"t{call_count}",
+                        name="bash",
+                        arguments={"command": f"echo {call_count}"},
+                    )
+                ],
+                finish_reason="tool_use",
+            )
+
+        client.chat = mock_chat
+
+        async def fake_bash(**kw):
+            return "ok"
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolDef(
+                name="bash",
+                description="",
+                parameters={"type": "object", "properties": {}, "required": []},
+                handler=fake_bash,
+            )
+        )
+
+        await client.chat_loop(
+            messages,
+            registry,
+            max_rounds=2,
+            interject_queue=interject_queue,
+        )
+
+        assert forced_final_round, "test setup failed — never hit max_rounds path"
+        assert (
+            interject_queue.empty()
+        ), "interjection during max_rounds final chat() was dropped"
