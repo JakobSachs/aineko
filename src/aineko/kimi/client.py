@@ -50,7 +50,9 @@ def _drain_interjections(
         else:
             last["content"] = f"{existing}\n\n{combined}"
     else:
-        messages.append({"role": "user", "content": combined})
+        messages.append(
+            {"role": "user", "content": [{"type": "text", "text": combined}]}
+        )
 
 
 def _history_missing_reasoning(conversation: list[dict[str, Any]]) -> bool:
@@ -364,7 +366,6 @@ class KimiClient:
         """Run the chat → tool call → chat loop until the agent produces a final response."""
         tool_history: list[ToolCallRecord] = []
         intermediate_messages: list[str] = []
-        recent_calls: list[tuple[str, str]] = []
         rounds_since_checkpoint = 0
         dedup = MessageDeduplicator()
         start_len = len(messages)
@@ -376,6 +377,7 @@ class KimiClient:
         round_num = 0
         while True:
             pending: ChatResponse | None = None
+            recent_calls = []
 
             while round_num < max_rounds:
                 _drain_interjections(messages, interject_queue)

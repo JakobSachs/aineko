@@ -26,6 +26,18 @@ def _msg(body: str, room: str = "!room:test") -> IncomingMessage:
     )
 
 
+def _img_msg(body: str, room: str = "!room:test") -> IncomingMessage:
+    return IncomingMessage(
+        room_id=room,
+        sender="@user:test",
+        body=body,
+        timestamp=datetime.now(timezone.utc),
+        event_id=f"evt_{body}",
+        image_b64="aGVsbG8=",  # any non-None marker
+        image_mime="image/png",
+    )
+
+
 @pytest.fixture(autouse=True)
 def fast_debounce():
     with patch("aineko.queue.DEBOUNCE_MS", _TEST_DEBOUNCE_MS):
@@ -244,10 +256,104 @@ class TestQueueProperties:
 
         assert flat == order
 
+    @given(
+        handler_ms=_handler_ms,
+        kinds=st.lists(st.sampled_from(["text", "image"]), min_size=2, max_size=6),
+        delays=st.lists(_delay_ms, min_size=2, max_size=6),
+    )
+    @hsettings(max_examples=20, deadline=None)
+    @pytest.mark.asyncio
+    async def test_text_interjects_image_requeues(
+        self, handler_ms: int, kinds: list[str], delays: list[int]
+    ):
+        """During a slow handler, text messages must interject into the live
+        turn while image messages must be re-queued for a fresh handler call
+        (because vision input needs full message context, not just a string)."""
+        n = min(len(kinds), len(delays))
+        kinds = kinds[:n]
+        delays = delays[:n]
+
+        received_main: list[IncomingMessage] = []
+        received_interjected: list[str] = []
+
+        async def handler(msg: IncomingMessage, interject: asyncio.Queue) -> None:
+            received_main.append(msg)
+            await asyncio.sleep(handler_ms / 1000)
+            while not interject.empty():
+                received_interjected.append(interject.get_nowait())
+
+        q = MessageQueue(handler)
+        text_bodies: list[str] = []
+        image_bodies: list[str] = []
+        for i, (kind, delay) in enumerate(zip(kinds, delays)):
+            body = f"{kind}_{i}"
+            if kind == "text":
+                text_bodies.append(body)
+                await q.enqueue(_msg(body))
+            else:
+                image_bodies.append(body)
+                await q.enqueue(_img_msg(body))
+            await asyncio.sleep(delay / 1000)
+
+        budget = (_TEST_DEBOUNCE_MS + handler_ms) * len(kinds) + 300
+        await asyncio.sleep(budget / 1000)
+
+        # Every body must surface somewhere — no message lost.
+        seen = _extract_bodies(received_main) | set(received_interjected)
+        assert seen == set(text_bodies) | set(image_bodies)
+
+        # Every image arrived as a (re-)queued main handler call, never as
+        # an interjection — vision input must trigger a fresh turn.
+        for body in image_bodies:
+            assert (
+                body not in received_interjected
+            ), f"image {body} was interjected; it should have been re-queued"
+
 
 # ---------------------------------------------------------------------------
 # Regression: the exact scenario that caused the bug
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_multiple_images_in_batch_all_reach_handler():
+    """BUG: when N>1 messages debounce-batch and at least two carry image_b64,
+    `_drain` does `batch[-1].model_copy(update={"body": combined_body})` —
+    only the LAST message's image_b64 survives. Every earlier image is
+    discarded. The model sees the captions but only one of the images.
+
+    Send two image messages within the debounce window; the handler must
+    receive both image payloads (e.g. by getting two separate calls, or by
+    receiving a message that carries every image). Today it gets one call
+    with only image B's bytes, image A is lost."""
+    received: list[IncomingMessage] = []
+
+    async def handler(msg: IncomingMessage, interject: asyncio.Queue) -> None:
+        received.append(msg)
+
+    q = MessageQueue(handler)
+    img_a = _img_msg("first_image")
+    img_a_b64 = "AAAA_image_a_bytes"
+    img_a = img_a.model_copy(update={"image_b64": img_a_b64})
+    img_b = _img_msg("second_image")
+    img_b_b64 = "BBBB_image_b_bytes"
+    img_b = img_b.model_copy(update={"image_b64": img_b_b64})
+
+    await q.enqueue(img_a)
+    await asyncio.sleep(0.005)  # within debounce window
+    await q.enqueue(img_b)
+    await asyncio.sleep(0.1)
+
+    seen_b64s: set[str] = set()
+    for m in received:
+        if m.image_b64:
+            seen_b64s.add(m.image_b64)
+
+    assert img_a_b64 in seen_b64s, (
+        f"image A's bytes were dropped during batching — handler only saw "
+        f"{seen_b64s}. The model has no way to look at image A."
+    )
+    assert img_b_b64 in seen_b64s, "image B's bytes missing too"
 
 
 @pytest.mark.asyncio

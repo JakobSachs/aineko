@@ -3,6 +3,8 @@
 import asyncio
 
 import pytest
+from hypothesis import given, settings as hsettings
+from hypothesis import strategies as st
 from unittest.mock import MagicMock
 
 from aineko.kimi.client import KimiClient, ChatResponse, ToolCall
@@ -547,3 +549,382 @@ class TestInterjectionRace:
         assert (
             interject_queue.empty()
         ), "interjection during max_rounds final chat() was dropped"
+
+
+# ---------------------------------------------------------------------------
+# Property tests: random interjection schedules across random round counts
+# ---------------------------------------------------------------------------
+
+
+def _collect_user_text(messages: list[dict]) -> str:
+    """Concatenate all human-readable user text in messages, including
+    text blocks merged into tool_result-bearing user messages."""
+    parts: list[str] = []
+    for m in messages:
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+    return "\n".join(parts)
+
+
+def _assert_no_consecutive_user(messages: list[dict]) -> None:
+    prev_role: str | None = None
+    for i, m in enumerate(messages):
+        role = m.get("role")
+        if role == "user" and prev_role == "user":
+            raise AssertionError(
+                f"consecutive user-role messages at index {i - 1}, {i}: "
+                f"{messages[i - 1]} -> {m}"
+            )
+        prev_role = role
+
+
+def _assert_tool_use_paired(messages: list[dict]) -> None:
+    """Every assistant message with tool_use blocks must be immediately followed
+    by a user message containing tool_result blocks for each tool_use id."""
+    for i, m in enumerate(messages):
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        tool_use_ids = [
+            b["id"]
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "tool_use"
+        ]
+        if not tool_use_ids:
+            continue
+        assert i + 1 < len(messages), f"trailing tool_use with no result at {i}"
+        nxt = messages[i + 1]
+        assert nxt.get("role") == "user", f"tool_use at {i} not followed by user"
+        nxt_content = nxt.get("content")
+        assert isinstance(nxt_content, list), "tool_result message must use blocks"
+        result_ids = {
+            b.get("tool_use_id")
+            for b in nxt_content
+            if isinstance(b, dict) and b.get("type") == "tool_result"
+        }
+        for tid in tool_use_ids:
+            assert tid in result_ids, (
+                f"tool_use id {tid} at message {i} has no matching tool_result "
+                f"in next message"
+            )
+
+
+class TestChatLoopProperties:
+    """Fuzz interjection timing across random round counts. Each test enqueues
+    interjections at random points during the run and asserts the loop's
+    invariants hold regardless of when they land."""
+
+    @given(
+        rounds_to_tool=st.integers(min_value=0, max_value=4),
+        interject_targets=st.lists(
+            st.integers(min_value=0, max_value=8), min_size=0, max_size=6
+        ),
+    )
+    @hsettings(max_examples=40, deadline=None)
+    @pytest.mark.asyncio
+    async def test_interjections_preserved_and_history_well_formed(
+        self, rounds_to_tool: int, interject_targets: list[int]
+    ):
+        """For an arbitrary mix of tool-using rounds and interjection arrivals,
+        chat_loop must (a) never strand a message in the queue, (b) inject
+        every interjection into the conversation, (c) never produce two
+        consecutive user-role messages, (d) keep every tool_use paired with a
+        tool_result."""
+        client = KimiClient(_make_settings())
+        messages: list[dict] = [{"role": "user", "content": "kickoff"}]
+        interject_queue: asyncio.Queue[str] = asyncio.Queue()
+
+        # Map each scheduled interjection to a clipped target call index in
+        # [0, rounds_to_tool] so it actually gets injected before the loop
+        # decides to terminate.
+        clipped_targets = [min(t, rounds_to_tool) for t in interject_targets]
+        bodies = [f"inj_{i}" for i in range(len(clipped_targets))]
+        remaining = list(range(len(clipped_targets)))
+
+        call_count = 0
+
+        async def mock_chat(msgs, tools=None):
+            nonlocal call_count
+            this_call = call_count
+            call_count += 1
+            # Drop scheduled interjections onto the queue *during* this call,
+            # simulating user messages arriving while the LLM await is in flight.
+            for idx in list(remaining):
+                if clipped_targets[idx] == this_call:
+                    interject_queue.put_nowait(bodies[idx])
+                    remaining.remove(idx)
+            await asyncio.sleep(0)
+            # Hard guard: never tool-call once tools is None (forced summary).
+            if tools is None:
+                return ChatResponse(content="forced", finish_reason="end_turn")
+            if this_call < rounds_to_tool:
+                return ChatResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id=f"t{this_call}",
+                            name="bash",
+                            arguments={"i": this_call},
+                        )
+                    ],
+                    finish_reason="tool_use",
+                )
+            return ChatResponse(content="done", finish_reason="end_turn")
+
+        client.chat = mock_chat
+
+        async def fake_bash(**kw):
+            return "ok"
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolDef(
+                name="bash",
+                description="",
+                parameters={"type": "object", "properties": {}, "required": []},
+                handler=fake_bash,
+            )
+        )
+
+        await client.chat_loop(
+            messages,
+            registry,
+            max_rounds=20,
+            interject_queue=interject_queue,
+        )
+
+        # (a) no interjection stranded
+        assert interject_queue.empty(), "interjection left in queue at exit"
+        assert remaining == [], "test setup: not all scheduled bodies were injected"
+
+        # (b) every body present somewhere in the user-side text
+        all_user = _collect_user_text(messages)
+        for body in bodies:
+            assert body in all_user, f"interjection {body!r} never reached messages"
+
+        # (c) no consecutive user-role messages (API rejects this)
+        _assert_no_consecutive_user(messages)
+
+        # (d) tool_use / tool_result pairing intact
+        _assert_tool_use_paired(messages)
+
+    @pytest.mark.asyncio
+    async def test_pure_interjection_survives_persistence_filter(self):
+        """BUG: a user message containing only an interjection (no tool_result
+        blocks) is in `pending.new_messages` but `persist_response` skips it
+        because its filter requires `has_tool_result`. The user's text never
+        reaches the DB — next turn the model has no record the user said it.
+
+        Repro: model returns end_turn on the first call, an interjection lands
+        during that call, exit gate re-enters, _drain_interjections appends a
+        NEW user message (trailing message is now assistant). That new user
+        message has only text blocks — persistence drops it on the floor."""
+        client = KimiClient(_make_settings())
+        messages: list[dict] = [{"role": "user", "content": "kickoff"}]
+        interject_queue: asyncio.Queue[str] = asyncio.Queue()
+
+        call_count = 0
+
+        async def mock_chat(msgs, tools=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                interject_queue.put_nowait("URGENT_USER_TEXT")
+                await asyncio.sleep(0)
+                return ChatResponse(content="first reply", finish_reason="end_turn")
+            return ChatResponse(content="second reply", finish_reason="end_turn")
+
+        client.chat = mock_chat
+        registry = ToolRegistry()
+
+        response = await client.chat_loop(
+            messages, registry, interject_queue=interject_queue
+        )
+
+        # Replicate persist_response's filter after the fix (handler.py):
+        # list-format user messages are persisted (both tool_result-bearing and
+        # pure-text interjections); string-content messages (checkpoint prompts)
+        # are transient and skipped.
+        persisted_user_text: list[str] = []
+        for m in response.new_messages:
+            if m.get("role") != "user":
+                continue
+            content = m.get("content")
+            if not isinstance(content, list):
+                continue  # string-content: checkpoint / max-rounds prompt, transient
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    persisted_user_text.append(b.get("text", ""))
+
+        joined = "\n".join(persisted_user_text)
+        assert "URGENT_USER_TEXT" in joined, (
+            "interjection text was not found in list-format user messages — "
+            "_drain_interjections may have reverted to string content, or "
+            "the message was not included in new_messages."
+        )
+
+    @pytest.mark.asyncio
+    async def test_doom_loop_counter_does_not_persist_across_reentry(self):
+        """BUG: `recent_calls` accumulates across the entire chat_loop, including
+        across exit-gate re-entries. If the model called X(args) DOOM_LOOP_THRESHOLD-1
+        times pre-interjection, then the user interjects, then the model legitimately
+        calls X(args) once more to start fresh work, the doom-loop guard trips
+        and the call is rejected — even though the user's interjection makes
+        this a new context, not a stuck loop."""
+        from aineko.kimi.client import DOOM_LOOP_THRESHOLD
+
+        client = KimiClient(_make_settings())
+        messages: list[dict] = [{"role": "user", "content": "go"}]
+        interject_queue: asyncio.Queue[str] = asyncio.Queue()
+
+        call_count = 0
+        bash_invocations: list[dict] = []
+
+        async def mock_chat(msgs, tools=None):
+            nonlocal call_count
+            call_count += 1
+            # First (THRESHOLD-1) tool calls all repeat the same args, building
+            # up the doom-loop counter just under the trip threshold.
+            if call_count <= DOOM_LOOP_THRESHOLD - 1:
+                return ChatResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id=f"t{call_count}", name="bash", arguments={"cmd": "x"}
+                        )
+                    ],
+                    finish_reason="tool_use",
+                )
+            # Then end_turn, but an interjection lands mid-flight.
+            if call_count == DOOM_LOOP_THRESHOLD:
+                interject_queue.put_nowait("now do x for real this time")
+                await asyncio.sleep(0)
+                return ChatResponse(content="ok", finish_reason="end_turn")
+            # After re-entry: model addresses the new context with the same
+            # tool. A *fresh* call following user input is not a doom loop —
+            # but the leftover counter says otherwise.
+            if call_count == DOOM_LOOP_THRESHOLD + 1:
+                return ChatResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id=f"t{call_count}", name="bash", arguments={"cmd": "x"}
+                        )
+                    ],
+                    finish_reason="tool_use",
+                )
+            return ChatResponse(content="done", finish_reason="end_turn")
+
+        client.chat = mock_chat
+
+        async def fake_bash(**kw):
+            bash_invocations.append(kw)
+            return "ok"
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolDef(
+                name="bash",
+                description="",
+                parameters={"type": "object", "properties": {}, "required": []},
+                handler=fake_bash,
+            )
+        )
+
+        await client.chat_loop(
+            messages,
+            registry,
+            max_rounds=20,
+            interject_queue=interject_queue,
+        )
+
+        # The post-interjection bash call should have actually executed. If the
+        # doom-loop guard trips on it, fake_bash never runs → bug.
+        post_interject_calls = len(bash_invocations) - (DOOM_LOOP_THRESHOLD - 1)
+        assert post_interject_calls >= 1, (
+            "doom-loop counter persisted across exit-gate re-entry: model's "
+            "first tool call after the user's interjection was rejected as a "
+            "loop. recent_calls should reset (or decay) when an interjection "
+            "establishes new context."
+        )
+
+    @given(
+        burst_size=st.integers(min_value=1, max_value=5),
+        round_count=st.integers(min_value=1, max_value=4),
+    )
+    @hsettings(max_examples=20, deadline=None)
+    @pytest.mark.asyncio
+    async def test_burst_of_interjections_on_final_turn_all_addressed(
+        self, burst_size: int, round_count: int
+    ):
+        """Simultaneous burst of interjections during the final (end_turn) call:
+        the loop should re-enter, drain them all in one round, and then exit
+        cleanly with the queue empty."""
+        client = KimiClient(_make_settings())
+        messages: list[dict] = [{"role": "user", "content": "go"}]
+        interject_queue: asyncio.Queue[str] = asyncio.Queue()
+
+        call_count = 0
+        burst_dropped = False
+
+        async def mock_chat(msgs, tools=None):
+            nonlocal call_count, burst_dropped
+            this_call = call_count
+            call_count += 1
+            # On the call that's about to return end_turn, dump the whole burst.
+            if this_call == round_count and not burst_dropped:
+                for i in range(burst_size):
+                    interject_queue.put_nowait(f"burst_{i}")
+                burst_dropped = True
+                await asyncio.sleep(0)
+            if tools is None:
+                return ChatResponse(content="forced", finish_reason="end_turn")
+            if this_call < round_count:
+                return ChatResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id=f"t{this_call}", name="bash", arguments={"i": this_call}
+                        )
+                    ],
+                    finish_reason="tool_use",
+                )
+            return ChatResponse(content="done", finish_reason="end_turn")
+
+        client.chat = mock_chat
+
+        async def fake_bash(**kw):
+            return "ok"
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolDef(
+                name="bash",
+                description="",
+                parameters={"type": "object", "properties": {}, "required": []},
+                handler=fake_bash,
+            )
+        )
+
+        await client.chat_loop(
+            messages,
+            registry,
+            max_rounds=20,
+            interject_queue=interject_queue,
+        )
+
+        assert interject_queue.empty()
+        all_user = _collect_user_text(messages)
+        for i in range(burst_size):
+            assert f"burst_{i}" in all_user, f"burst_{i} dropped"
+        _assert_no_consecutive_user(messages)
+        _assert_tool_use_paired(messages)

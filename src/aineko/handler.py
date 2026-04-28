@@ -246,37 +246,49 @@ async def persist_response(
                 # A user turn produced inside chat_loop is one of:
                 # (a) tool_result blocks paired with the previous assistant
                 #     tool_use — must be persisted to keep the API contract;
-                # (b) a checkpoint "Progress check" prompt — transient;
+                # (b) a checkpoint "Progress check" prompt or max-rounds
+                #     summary — stored as plain string content, transient;
                 # (c) a pure interjection appended when the trailing message
-                #     was not a tool_result user — also transient.
-                # Interjections can also be appended onto a tool_result
-                # message as extra `text` blocks; in that case the message
-                # is still (a) and must be persisted with the mixed content
-                # intact, or replay sees an orphan tool_use → 400.
+                #     was not a tool_result user — list-format text blocks,
+                #     must be persisted so next session sees the user said it.
+                # Interjections can also be merged into a tool_result message
+                # as extra `text` blocks; in that case the message is (a).
+                # String-content messages (b) were already skipped above by
+                # `isinstance(content_blocks, list)`.
                 has_tool_result = any(
                     isinstance(b, dict) and b.get("type") == "tool_result"
                     for b in content_blocks
                 )
-                if not has_tool_result:
-                    continue
-                clipped: list[dict[str, Any]] = []
-                for b in content_blocks:
-                    if not isinstance(b, dict):
-                        continue
-                    nb = dict(b)
-                    if nb.get("type") == "tool_result" and isinstance(
-                        nb.get("content"), str
-                    ):
-                        nb["content"] = nb["content"][:2000]
-                    clipped.append(nb)
-                db.add(
-                    Message(
-                        session_id=session_id,
-                        role=Role.TOOL,
-                        content=json.dumps(clipped),
-                        blocks=clipped,
+                if has_tool_result:
+                    clipped: list[dict[str, Any]] = []
+                    for b in content_blocks:
+                        if not isinstance(b, dict):
+                            continue
+                        nb = dict(b)
+                        if nb.get("type") == "tool_result" and isinstance(
+                            nb.get("content"), str
+                        ):
+                            nb["content"] = nb["content"][:2000]
+                        clipped.append(nb)
+                    db.add(
+                        Message(
+                            session_id=session_id,
+                            role=Role.TOOL,
+                            content=json.dumps(clipped),
+                            blocks=clipped,
+                        )
                     )
-                )
+                else:
+                    # Pure-text interjection — save as USER so it survives
+                    # into next session's load_conversation replay.
+                    db.add(
+                        Message(
+                            session_id=session_id,
+                            role=Role.USER,
+                            content=json.dumps(content_blocks),
+                            blocks=content_blocks,
+                        )
+                    )
     elif response.tool_history:
         # Legacy path retained for any caller not yet on the new
         # ChatResponse contract. New code should always populate

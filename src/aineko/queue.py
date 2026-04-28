@@ -85,26 +85,41 @@ class MessageQueue:
             batch = list(self._queue)
             self._queue.clear()
 
-            if len(batch) == 1:
-                msg = batch[0]
-            else:
-                parts = [f"[message {i+1}]: {m.body}" for i, m in enumerate(batch)]
-                combined_body = "\n".join(parts)
-                # Use the last message as the base (most recent timestamp, may have image)
-                msg = batch[-1].model_copy(update={"body": combined_body})
-                logger.info(
-                    "messages combined",
-                    extra={"event": "queue_batch", "count": len(batch)},
-                )
+            # Split batch into groups: image-bearing messages get their own
+            # turn so their image_b64 payload isn't overwritten by merging.
+            groups: list[list[IncomingMessage]] = []
+            pending_text: list[IncomingMessage] = []
+            for m in batch:
+                if m.image_b64:
+                    if pending_text:
+                        groups.append(pending_text)
+                        pending_text = []
+                    groups.append([m])
+                else:
+                    pending_text.append(m)
+            if pending_text:
+                groups.append(pending_text)
 
-            interject: asyncio.Queue[str] = asyncio.Queue()
-            self._active_interject = interject
-            try:
-                await self._handler(msg, interject)
-            except Exception:
-                logger.exception("Error processing queued message")
-            finally:
-                self._active_interject = None
+            for group in groups:
+                if len(group) == 1:
+                    msg = group[0]
+                else:
+                    parts = [f"[message {i+1}]: {m.body}" for i, m in enumerate(group)]
+                    combined_body = "\n".join(parts)
+                    msg = group[-1].model_copy(update={"body": combined_body})
+                    logger.info(
+                        "messages combined",
+                        extra={"event": "queue_batch", "count": len(group)},
+                    )
+
+                interject: asyncio.Queue[str] = asyncio.Queue()
+                self._active_interject = interject
+                try:
+                    await self._handler(msg, interject)
+                except Exception:
+                    logger.exception("Error processing queued message")
+                finally:
+                    self._active_interject = None
 
         # Check if new messages arrived while we were processing
         if self._queue:
