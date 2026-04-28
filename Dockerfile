@@ -2,12 +2,13 @@ FROM ubuntu:24.04
 
 WORKDIR /app
 
-# Install system deps (python3.12, libolm for matrix-nio[e2e], ROCm runtime libs)
+# Install system deps
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3.12 python3.12-dev python3.12-venv \
-        libolm-dev gcc clang curl ca-certificates git ripgrep \
-        libnuma1 libdrm2 poppler-utils imagemagick file jq tzdata && \
+        libolm-dev gcc g++ clang curl ca-certificates git ripgrep \
+        libnuma1 libdrm2 poppler-utils imagemagick file jq tzdata \
+        nvidia-cuda-toolkit && \
     rm -rf /var/lib/apt/lists/*
 
 # Install uv
