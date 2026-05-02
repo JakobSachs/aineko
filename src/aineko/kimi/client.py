@@ -525,6 +525,13 @@ class KimiClient:
                 pending_blocks = self._build_assistant_content(pending)
                 if pending_blocks:
                     messages.append({"role": "assistant", "content": pending_blocks})
+                # Dispatch the in-flight final reply before pivoting to the
+                # interjection — otherwise it's committed to history but never
+                # reaches the user, and they only see the answer to the newer
+                # message. on_intermediate routes to matrix.send_message.
+                if pending.content and on_intermediate is not None:
+                    await on_intermediate(pending.content)
+                    intermediate_messages.append(pending.content)
                 max_rounds = round_num + max_rounds
                 continue
 

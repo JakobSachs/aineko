@@ -466,7 +466,17 @@ class TestInterjectionRace:
         client.chat = mock_chat
         registry = ToolRegistry()
 
-        await client.chat_loop(messages, registry, interject_queue=interject_queue)
+        sent: list[str] = []
+
+        async def on_intermediate(text: str) -> None:
+            sent.append(text)
+
+        response = await client.chat_loop(
+            messages,
+            registry,
+            interject_queue=interject_queue,
+            on_intermediate=on_intermediate,
+        )
 
         # The interjection must have been consumed (not stranded in the queue).
         assert (
@@ -484,6 +494,15 @@ class TestInterjectionRace:
         assert "Can ya help me make a list" in all_user_text or call_count >= 2, (
             "interjected message was never injected into history nor triggered "
             "a follow-up LLM round"
+        )
+
+        # The original in-flight reply must reach the user. Without dispatch,
+        # it gets committed to history but never sent — only the answer to the
+        # interjection arrives, and the original reply is silently dropped.
+        delivered = sent + ([response.content] if response.content else [])
+        assert "safe travels tomorrow" in delivered, (
+            "in-flight final reply was dropped on the floor when an "
+            "interjection arrived during the exit gate"
         )
 
     @pytest.mark.asyncio
