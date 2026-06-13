@@ -1,21 +1,56 @@
-"""Async Kimi API client — Anthropic Messages API format."""
+"""Async LLM client backed by LiteLLM."""
 
 import asyncio
+import base64
 import json
 import logging
+import os
+import platform
+import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
+from litellm import acompletion
 
-from aineko.config import KimiSettings
+from aineko.config import LLMSettings
 from aineko.messaging_dedupe import MessageDeduplicator
 from aineko.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 DOOM_LOOP_THRESHOLD = 3
+OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+OPENAI_CODEX_ISSUER = "https://auth.openai.com"
+OPENAI_CODEX_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
+
+_INTENT_TO_CONTINUE_RE = re.compile(
+    r"(?is)"
+    r"(?:\b(?:i|we)\s+(?:need|should|will|would|can|must|am|are|['’]?ll|['’]?m)\s+"
+    r"(?:going\s+)?to\s+)"
+    r"(?:check|inspect|look|run|test|try|restart|fix|patch|debug|investigate|"
+    r"verify|confirm|read|search|grep|open|list|install|build|deploy|copy|send|"
+    r"start|stop|kill|serve|export|rerun)"
+    r"|(?:\bnext\b|\bnow\b|\bthen\b).{0,80}\b"
+    r"(?:check|inspect|look|run|test|try|restart|fix|patch|debug|investigate|"
+    r"verify|confirm|read|search|grep|open|list|install|build|deploy|copy|send|"
+    r"start|stop|kill|serve|export|rerun)"
+)
+_INTENT_BLOCKED_RE = re.compile(
+    r"(?is)\b(?:blocked|need (?:your|user) (?:input|permission|approval)|"
+    r"can't proceed|cannot proceed|which .*\?|what .*\?)\b"
+)
+
+
+def _looks_like_unfinished_intent(text: str) -> bool:
+    """Heuristic: final answer says it will do toolable work, but stopped."""
+    cleaned = text.strip()
+    if not cleaned or _INTENT_BLOCKED_RE.search(cleaned):
+        return False
+    return bool(_INTENT_TO_CONTINUE_RE.search(cleaned))
 
 
 def _drain_interjections(
@@ -90,25 +125,24 @@ class ChatResponse:
 
 
 class KimiClient:
-    def __init__(self, settings: KimiSettings) -> None:
+    def __init__(self, settings: LLMSettings) -> None:
         self._settings = settings
-        headers: dict[str, str] = {
-            "x-api-key": settings.api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        }
+        self._completion = acompletion
+        self._http = SimpleNamespace(post=None)
+        self._anthropic_http = httpx.AsyncClient(timeout=120)
+        self._opencode_http = httpx.AsyncClient(timeout=120)
+        self._extra_headers: dict[str, str] = {}
         if settings.user_agent:
-            headers["User-Agent"] = settings.user_agent
-        self._http = httpx.AsyncClient(
-            base_url=settings.base_url,
-            headers=headers,
-            timeout=120,
-        )
+            self._extra_headers["User-Agent"] = settings.user_agent
 
     def _build_tools(self, tools: ToolRegistry) -> list[dict[str, Any]]:
-        """Convert tool registry to Anthropic tool format."""
+        """Return OpenAI-compatible tool definitions for LiteLLM."""
+        return tools.schemas()
+
+    @staticmethod
+    def _tools_to_anthropic(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = []
-        for schema in tools.schemas():
+        for schema in tools:
             func = schema["function"]
             result.append(
                 {
@@ -118,6 +152,415 @@ class KimiClient:
                 }
             )
         return result
+
+    def _chat_kwargs(self, payload: dict[str, Any]) -> dict[str, Any]:
+        messages = list(payload["messages"])
+        if payload.get("system"):
+            messages.insert(0, {"role": "system", "content": payload["system"]})
+        kwargs: dict[str, Any] = {
+            "model": payload["model"],
+            "messages": messages,
+            "max_tokens": payload["max_tokens"],
+            "temperature": payload["temperature"],
+            "top_p": payload["top_p"],
+            "timeout": 120,
+            "num_retries": 3,
+        }
+        if self._settings.api_key:
+            kwargs["api_key"] = self._settings.api_key
+        if self._settings.base_url:
+            kwargs["api_base"] = self._settings.base_url
+        if payload.get("tools"):
+            kwargs["tools"] = payload["tools"]
+            kwargs["tool_choice"] = payload.get("tool_choice", "auto")
+        if self._extra_headers:
+            kwargs["extra_headers"] = self._extra_headers
+        # LiteLLM forwards unknown provider params when supported. This keeps
+        # Kimi/Anthropic reasoning configurable without making it core logic.
+        if payload.get("thinking"):
+            kwargs["thinking"] = payload["thinking"]
+        return kwargs
+
+    def _uses_raw_anthropic_messages(self) -> bool:
+        return self._settings.model.startswith("anthropic/") and bool(
+            self._settings.base_url
+        )
+
+    def _uses_opencode_openai(self) -> bool:
+        return self._settings.provider == "opencode-openai"
+
+    def _anthropic_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = dict(payload)
+        result["model"] = result["model"].removeprefix("anthropic/")
+        if result.get("tools"):
+            result["tools"] = self._tools_to_anthropic(result["tools"])
+        return result
+
+    async def _raw_anthropic_completion(self, payload: dict[str, Any]) -> Any:
+        headers = {
+            "x-api-key": self._settings.api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+        headers.update(self._extra_headers)
+        resp = await self._anthropic_http.post(
+            f"{self._settings.base_url.rstrip('/')}/messages",
+            headers=headers,
+            json=self._anthropic_payload(payload),
+        )
+        resp.raise_for_status()
+        try:
+            return resp.json()
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "OpenCode OpenAI returned non-json response "
+                f"content-type={resp.headers.get('content-type')}: {resp.text[:1000]}"
+            ) from exc
+
+    @staticmethod
+    def _jwt_claims(token: str) -> dict[str, Any]:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return {}
+        try:
+            padded = parts[1] + "=" * (-len(parts[1]) % 4)
+            return json.loads(base64.urlsafe_b64decode(padded))
+        except (ValueError, json.JSONDecodeError):
+            return {}
+
+    @classmethod
+    def _account_id_from_tokens(cls, tokens: dict[str, Any]) -> str:
+        for key in ("id_token", "access_token"):
+            token = tokens.get(key)
+            if not token:
+                continue
+            claims = cls._jwt_claims(token)
+            auth_claims = claims.get("https://api.openai.com/auth") or {}
+            account_id = (
+                claims.get("chatgpt_account_id")
+                or auth_claims.get("chatgpt_account_id")
+                or (claims.get("organizations") or [{}])[0].get("id")
+            )
+            if account_id:
+                return account_id
+        return ""
+
+    async def _load_opencode_auth(self) -> dict[str, Any]:
+        path = self._settings.opencode_auth_path
+        try:
+            data = json.loads(path.read_text())
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"OpenCode auth file not found: {path}") from exc
+        auth = data.get("openai") or {}
+        if auth.get("type") != "oauth":
+            raise RuntimeError(
+                "OpenCode openai auth is not oauth; run opencode /connect"
+            )
+        if (
+            auth.get("access")
+            and auth.get("expires", 0) > int(time.time() * 1000) + 30_000
+        ):
+            return auth
+        if not auth.get("refresh"):
+            raise RuntimeError("OpenCode openai oauth record has no refresh token")
+        resp = await self._opencode_http.post(
+            f"{OPENAI_CODEX_ISSUER}/oauth/token",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": auth["refresh"],
+                "client_id": OPENAI_CODEX_CLIENT_ID,
+            },
+        )
+        resp.raise_for_status()
+        tokens = resp.json()
+        updated = {
+            "type": "oauth",
+            "refresh": tokens["refresh_token"],
+            "access": tokens["access_token"],
+            "expires": int(time.time() * 1000)
+            + int(tokens.get("expires_in", 3600)) * 1000,
+            "accountId": self._account_id_from_tokens(tokens) or auth.get("accountId"),
+        }
+        data["openai"] = updated
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.chmod(tmp, 0o600)
+        tmp.replace(path)
+        return updated
+
+    @staticmethod
+    def _content_to_openai_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return str(content)
+        parts: list[str] = []
+        for block in content:
+            btype = block.get("type")
+            if btype == "text":
+                parts.append(block.get("text", ""))
+            elif btype == "tool_result":
+                marker = "tool_result"
+                if block.get("is_error"):
+                    marker = "tool_error"
+                parts.append(
+                    f"[{marker} {block.get('tool_use_id', '')}]\n{block.get('content', '')}"
+                )
+            elif btype not in {"thinking", "tool_use"}:
+                parts.append(json.dumps(block, ensure_ascii=False))
+        return "\n\n".join(p for p in parts if p)
+
+    def _opencode_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        instructions = payload.get("system")
+        input_items = []
+        for message in payload["messages"]:
+            role = message.get("role", "user")
+            if role == "assistant":
+                role = "assistant"
+            elif role not in {"user", "developer", "system"}:
+                role = "user"
+            text = self._content_to_openai_text(message.get("content", ""))
+            if text:
+                content_type = "output_text" if role == "assistant" else "input_text"
+                input_items.append(
+                    {
+                        "role": role,
+                        "content": [{"type": content_type, "text": text}],
+                    }
+                )
+        result: dict[str, Any] = {
+            "model": payload["model"].removeprefix("openai/"),
+            "input": input_items,
+            "store": False,
+            "stream": True,
+            "reasoning": {"effort": "low"},
+        }
+        result["instructions"] = instructions or "You are aineko, a concise assistant."
+        if payload.get("tools"):
+            result["tools"] = [
+                {
+                    "type": "function",
+                    "name": tool["function"]["name"],
+                    "description": tool["function"].get("description", ""),
+                    "parameters": tool["function"].get("parameters", {}),
+                }
+                for tool in payload["tools"]
+            ]
+            result["tool_choice"] = "auto"
+        return result
+
+    async def _opencode_openai_completion(self, payload: dict[str, Any]) -> Any:
+        auth = await self._load_opencode_auth()
+        headers = {
+            "Authorization": f"Bearer {auth['access']}",
+            "Content-Type": "application/json",
+            "originator": "opencode",
+            "User-Agent": f"opencode/0.0.0 ({platform.system().lower()} {platform.release()}; {platform.machine()})",
+            "session-id": "aineko",
+        }
+        if auth.get("accountId"):
+            headers["ChatGPT-Account-Id"] = auth["accountId"]
+        resp = await self._opencode_http.post(
+            OPENAI_CODEX_ENDPOINT,
+            headers=headers,
+            json=self._opencode_payload(payload),
+        )
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(f"OpenCode OpenAI request failed: {resp.text}") from exc
+        if "text/event-stream" in resp.headers.get(
+            "content-type", ""
+        ) or resp.text.startswith("event:"):
+            completed: dict[str, Any] | None = None
+            text_parts: list[str] = []
+            output_items: list[dict[str, Any]] = []
+            event_name = ""
+            for line in resp.text.splitlines():
+                if line.startswith("event: "):
+                    event_name = line.removeprefix("event: ")
+                    continue
+                if not line.startswith("data: "):
+                    continue
+                raw = line.removeprefix("data: ")
+                if raw == "[DONE]":
+                    continue
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    event_name == "response.output_text.delta"
+                    or event.get("type") == "response.output_text.delta"
+                ):
+                    delta = event.get("delta")
+                    if isinstance(delta, str):
+                        text_parts.append(delta)
+                if (
+                    event_name == "response.output_item.done"
+                    or event.get("type") == "response.output_item.done"
+                ):
+                    item = event.get("item")
+                    if isinstance(item, dict):
+                        output_items.append(item)
+                if (
+                    event_name == "response.completed"
+                    or event.get("type") == "response.completed"
+                ):
+                    completed = event.get("response")
+            if completed is not None:
+                if output_items:
+                    completed["output"] = output_items
+                elif text_parts and not completed.get("output"):
+                    completed["output"] = [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "".join(text_parts)}
+                            ],
+                        }
+                    ]
+                return completed
+            raise RuntimeError(
+                f"OpenCode OpenAI stream missing completion: {resp.text[:1000]}"
+            )
+        try:
+            return resp.json()
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "OpenCode OpenAI returned non-json response "
+                f"content-type={resp.headers.get('content-type')}: {resp.text[:1000]}"
+            ) from exc
+
+    @staticmethod
+    def _value(obj: Any, key: str, default: Any = None) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    def _parse_response(self, data: Any) -> ChatResponse:
+        if self._value(data, "output") is not None:
+            return self._parse_openai_responses_response(data)
+        # Anthropic-shaped responses can come back when using compatible APIs.
+        if self._value(data, "content") is not None:
+            return self._parse_anthropic_response(data)
+
+        choices = self._value(data, "choices", []) or []
+        choice = choices[0] if choices else {}
+        message = self._value(choice, "message", {}) or {}
+        usage = self._value(data, "usage", {}) or {}
+        finish_reason = self._value(choice, "finish_reason", "") or ""
+
+        content = self._value(message, "content", "") or ""
+        reasoning_content = self._value(message, "reasoning_content")
+        tool_calls: list[ToolCall] = []
+        for tc in self._value(message, "tool_calls", []) or []:
+            function = self._value(tc, "function", {}) or {}
+            raw_args = self._value(function, "arguments", {}) or {}
+            if isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    args = {"arguments": raw_args}
+            else:
+                args = raw_args
+            tool_calls.append(
+                ToolCall(
+                    id=self._value(tc, "id", ""),
+                    name=self._value(function, "name", ""),
+                    arguments=args,
+                )
+            )
+        return ChatResponse(
+            content=content,
+            reasoning_content=reasoning_content,
+            tool_calls=tool_calls,
+            usage=usage,
+            finish_reason=finish_reason,
+        )
+
+    def _parse_openai_responses_response(self, data: Any) -> ChatResponse:
+        output = self._value(data, "output", []) or []
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        for item in output:
+            item_type = self._value(item, "type", "")
+            if item_type == "message":
+                for part in self._value(item, "content", []) or []:
+                    ptype = self._value(part, "type", "")
+                    if ptype in {"output_text", "text"}:
+                        text_parts.append(self._value(part, "text", "") or "")
+            elif item_type == "function_call":
+                raw_args = self._value(item, "arguments", "{}") or "{}"
+                try:
+                    args = (
+                        json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    )
+                except json.JSONDecodeError:
+                    args = {"arguments": raw_args}
+                tool_calls.append(
+                    ToolCall(
+                        id=self._value(item, "call_id", "")
+                        or self._value(item, "id", ""),
+                        name=self._value(item, "name", ""),
+                        arguments=args,
+                    )
+                )
+            elif item_type == "reasoning":
+                for part in self._value(item, "summary", []) or []:
+                    text = self._value(part, "text", "")
+                    if text:
+                        reasoning_parts.append(text)
+        usage = self._value(data, "usage", {}) or {}
+        return ChatResponse(
+            content="\n".join(text_parts),
+            reasoning_content="\n".join(reasoning_parts) if reasoning_parts else None,
+            tool_calls=tool_calls,
+            usage={
+                "input_tokens": self._value(usage, "input_tokens", 0) or 0,
+                "output_tokens": self._value(usage, "output_tokens", 0) or 0,
+            },
+            finish_reason=self._value(data, "status", ""),
+        )
+
+    def _parse_anthropic_response(self, data: Any) -> ChatResponse:
+        content_blocks = self._value(data, "content", []) or []
+        usage = self._value(data, "usage", {}) or {}
+        stop_reason = self._value(data, "stop_reason", "") or ""
+
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        thinking_blocks: list[dict[str, Any]] = []
+        tool_calls: list[ToolCall] = []
+
+        for block in content_blocks:
+            btype = block.get("type")
+            if btype == "text":
+                text_parts.append(block.get("text", ""))
+            elif btype == "thinking":
+                reasoning_parts.append(block.get("thinking", ""))
+                thinking_blocks.append(
+                    {k: v for k, v in block.items() if k != "type"}
+                    | {"type": "thinking"}
+                )
+            elif btype == "tool_use":
+                tool_calls.append(
+                    ToolCall(
+                        id=block["id"],
+                        name=block["name"],
+                        arguments=block.get("input", {}),
+                    )
+                )
+        return ChatResponse(
+            content="\n".join(text_parts) if text_parts else "",
+            reasoning_content="\n".join(reasoning_parts) if reasoning_parts else None,
+            thinking_blocks=thinking_blocks,
+            tool_calls=tool_calls,
+            usage=usage,
+            finish_reason=stop_reason,
+        )
 
     async def chat(
         self,
@@ -165,87 +608,31 @@ class KimiClient:
                 "endpoint": "/messages",
                 "model": payload.get("model"),
                 "tool_count": len(payload.get("tools", [])),
-                "tool_names": [t["name"] for t in payload.get("tools", [])],
+                "tool_names": [
+                    t.get("function", {}).get("name", t.get("name", ""))
+                    for t in payload.get("tools", [])
+                ],
                 "thinking": payload.get("thinking"),
                 "msg_count": len(payload.get("messages", [])),
             },
         )
 
-        # Retry on transient errors (status codes and network timeouts)
-        retryable = {429, 500, 502, 503, 504, 529}
-        max_retries = 3
-        for attempt in range(max_retries + 1):
-            try:
-                resp = await self._http.post("/messages", json=payload)
-            except httpx.TimeoutException:
-                if attempt < max_retries:
-                    delay = 2**attempt
-                    logger.warning(
-                        "LLM API timeout, retrying in %ds (attempt %d/%d)",
-                        delay,
-                        attempt + 1,
-                        max_retries,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                raise
-            if resp.status_code in retryable and attempt < max_retries:
-                delay = 2**attempt
-                logger.warning(
-                    "LLM API %d, retrying in %ds (attempt %d/%d)",
-                    resp.status_code,
-                    delay,
-                    attempt + 1,
-                    max_retries,
-                )
-                await asyncio.sleep(delay)
-                continue
-            break
-        if resp.status_code >= 400:
-            logger.error(
-                "llm api error", extra={"event": "llm_error", "error": resp.text}
-            )
-        resp.raise_for_status()
-        data = resp.json()
-
-        # Parse Anthropic response format
-        content_blocks = data.get("content") or []
-        usage = data.get("usage", {})
-        stop_reason = data.get("stop_reason", "")
-
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        thinking_blocks: list[dict[str, Any]] = []
-        tool_calls: list[ToolCall] = []
-
-        for block in content_blocks:
-            btype = block.get("type")
-            if btype == "text":
-                text_parts.append(block.get("text", ""))
-            elif btype == "thinking":
-                reasoning_parts.append(block.get("thinking", ""))
-                # Preserve the raw block (including signature) for replay.
-                thinking_blocks.append(
-                    {k: v for k, v in block.items() if k != "type"}
-                    | {"type": "thinking"}
-                )
-            elif btype == "tool_use":
-                tool_calls.append(
-                    ToolCall(
-                        id=block["id"],
-                        name=block["name"],
-                        arguments=block.get("input", {}),
-                    )
-                )
-
-        result = ChatResponse(
-            content="\n".join(text_parts) if text_parts else "",
-            reasoning_content="\n".join(reasoning_parts) if reasoning_parts else None,
-            thinking_blocks=thinking_blocks,
-            tool_calls=tool_calls,
-            usage=usage,
-            finish_reason=stop_reason,
-        )
+        # Legacy test seam for old HTTP-level unit tests. Real requests go
+        # through LiteLLM via `_completion`.
+        if self._http.post is not None:
+            legacy_payload = dict(payload)
+            if payload.get("tools"):
+                legacy_payload["tools"] = self._tools_to_anthropic(payload["tools"])
+            resp = await self._http.post("/messages", json=legacy_payload)
+            resp.raise_for_status()
+            data = resp.json()
+        elif self._uses_raw_anthropic_messages():
+            data = await self._raw_anthropic_completion(payload)
+        elif self._uses_opencode_openai():
+            data = await self._opencode_openai_completion(payload)
+        else:
+            data = await self._completion(**self._chat_kwargs(payload))
+        result = self._parse_response(data)
 
         if result.reasoning_content:
             logger.info(
@@ -262,9 +649,10 @@ class KimiClient:
             extra={
                 "event": "llm_response",
                 "model": self._settings.model,
-                "tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
-                "finish_reason": stop_reason,
-                "raw_tool_call_count": len(tool_calls),
+                "tokens": result.usage.get("input_tokens", 0)
+                + result.usage.get("output_tokens", 0),
+                "finish_reason": result.finish_reason,
+                "raw_tool_call_count": len(result.tool_calls),
                 "content": (result.content or "")[:300],
             },
         )
@@ -332,6 +720,7 @@ class KimiClient:
         tool_history: list[ToolCallRecord] = []
         intermediate_messages: list[str] = []
         rounds_since_checkpoint = 0
+        intent_guard_count = 0
         dedup = MessageDeduplicator()
         start_len = len(messages)
 
@@ -511,6 +900,40 @@ class KimiClient:
                 )
                 pending = await self.chat(messages, tools=None)
 
+            # If the model produced a "I'll do X next" status instead of
+            # actually doing X, do not expose that as a final answer. Feed it
+            # back once/twice as an internal nudge so the next round performs
+            # the concrete tool action. This fixes the common Matrix UX where
+            # the user has to say "and??" to make the agent continue.
+            if (
+                pending.content
+                and intent_guard_count < 2
+                and _looks_like_unfinished_intent(pending.content)
+            ):
+                logger.info(
+                    "unfinished intent detected, continuing turn",
+                    extra={
+                        "event": "intent_continue_guard",
+                        "preview": pending.content[:200],
+                    },
+                )
+                pending_blocks = self._build_assistant_content(pending)
+                if pending_blocks:
+                    messages.append({"role": "assistant", "content": pending_blocks})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Continue now: perform the next concrete action with "
+                            "tools instead of ending with intent. If you are "
+                            "blocked, say exactly what input or permission you need."
+                        ),
+                    }
+                )
+                intent_guard_count += 1
+                max_rounds = round_num + max_rounds
+                continue
+
             # ---- single exit gate ----
             # If a user message landed in the interject queue while we were
             # awaiting the LLM, don't return — commit the assistant turn and
@@ -546,4 +969,5 @@ class KimiClient:
             return pending
 
     async def close(self) -> None:
-        await self._http.aclose()
+        await self._anthropic_http.aclose()
+        await self._opencode_http.aclose()

@@ -21,6 +21,7 @@ services:
   aineko:
     build: .
     restart: unless-stopped
+    network_mode: host
     depends_on:
       postgres:
         condition: service_healthy
@@ -29,12 +30,14 @@ services:
       - ~/Obsidian:/data/vault:ro
       - chroma-cache:/root/.cache/chroma
       - ~/.cache/uv:/root/.cache/uv
-    ports:
-      - "8080:8080"
+      - ~/.local/share/opencode:/opencode-auth
     env_file:
       - .env
     environment:
       TZ: UTC
+      AINEKO_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aineko}:${POSTGRES_PASSWORD:-aineko}@127.0.0.1:5432/${POSTGRES_DB:-aineko}
+    devices:
+      - nvidia.com/gpu=all
 
 volumes:
   chroma-cache:

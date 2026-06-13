@@ -41,38 +41,37 @@ MATRIX_HOMESERVER="https://matrix.org"
 
 ### LLM API
 
-The LLM client is OpenAI-compatible. It works with any provider that implements the `/chat/completions` endpoint.
+The LLM client uses LiteLLM, so `LLM_MODEL` can target OpenAI, Anthropic, OpenRouter, Moonshot/Kimi, Together, Fireworks, and other supported providers.
 
 | Variable | Description | Default |
 |----------|------------|---------|
-| `KIMI_API_KEY` | API key for your LLM provider | |
-| `KIMI_BASE_URL` | API base URL | `https://api.moonshot.cn/v1` |
-| `KIMI_MODEL` | Model name | `kimi-latest` |
-| `KIMI_USER_AGENT` | Custom User-Agent header (required by some endpoints) | |
+| `LLM_API_KEY` | API key for your LLM provider | |
+| `LLM_BASE_URL` | API base URL, when using a custom or compatible endpoint | |
+| `LLM_MODEL` | LiteLLM model name | `moonshot/kimi-k2.5` |
+| `LLM_USER_AGENT` | Custom User-Agent header (required by some endpoints) | |
 
 **Examples:**
 
 ```bash
 # OpenRouter (recommended — access to many models)
-KIMI_API_KEY=sk-or-...
-KIMI_BASE_URL=https://openrouter.ai/api/v1
-KIMI_MODEL=moonshotai/kimi-k2.5
+LLM_API_KEY=sk-or-...
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_MODEL=openrouter/moonshotai/kimi-k2.5
 
 # OpenAI
-KIMI_API_KEY=sk-...
-KIMI_BASE_URL=https://api.openai.com/v1
-KIMI_MODEL=gpt-4.1
+LLM_API_KEY=sk-...
+LLM_MODEL=openai/gpt-4.1
 
 # Moonshot/Kimi (developer API — separate from consumer subscription)
-KIMI_API_KEY=sk-...
-KIMI_BASE_URL=https://api.moonshot.cn/v1
-KIMI_MODEL=kimi-latest
+LLM_API_KEY=sk-...
+LLM_BASE_URL=https://api.moonshot.cn/v1
+LLM_MODEL=moonshot/kimi-latest
 
 # Kimi Coding (subscription API — requires Kimi Code membership)
-KIMI_API_KEY=sk-kimi-...
-KIMI_BASE_URL=https://api.kimi.com/coding/v1
-KIMI_MODEL=kimi-for-coding
-KIMI_USER_AGENT=claude-code/0.1.0
+LLM_API_KEY=sk-kimi-...
+LLM_BASE_URL=https://api.kimi.com/coding/v1
+LLM_MODEL=anthropic/kimi-for-coding
+LLM_USER_AGENT=claude-code/0.1.0
 ```
 
 Note: the Moonshot developer API at `api.moonshot.cn` requires a key from [platform.moonshot.cn](https://platform.moonshot.cn). A Kimi consumer subscription does **not** include API access.

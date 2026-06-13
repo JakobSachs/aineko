@@ -27,9 +27,10 @@ def make_send_message_tool(
     return ToolDef(
         name="send_message",
         description=(
-            "Send a message to the user. Call this to reply — your response "
-            "text is NOT automatically sent. Use this for every message you "
-            "want the user to see."
+            "Send a mid-work progress update to the user. Final response "
+            "text is sent automatically by the app; do NOT call this for "
+            "your final answer. Use it only when you need to update the user "
+            "before continuing with more tool work."
         ),
         parameters={
             "type": "object",

@@ -24,6 +24,7 @@ dependencies = [
     "feedparser>=6.0,<7",
     "watchfiles>=1.0,<2",
     "markitdown>=0.1.5",
+    "litellm>=1.70,<2",
 ]
 
 [project.scripts]

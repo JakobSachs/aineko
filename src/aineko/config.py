@@ -17,20 +17,30 @@ class MatrixSettings(BaseSettings):
     owner: str = ""  # only this matrix user is allowed to talk to the bot
 
 
-class KimiSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="KIMI_")
+class LLMSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="LLM_")
 
+    provider: str = "litellm"
     api_key: str = ""
-    model: str = "kimi-k2.5"
-    base_url: str = "https://api.moonshot.cn/v1"
+    model: str = "moonshot/kimi-k2.5"
+    base_url: str = ""
+    opencode_auth_path: Path = Path("/opencode-auth/auth.json")
     max_context_tokens: int = 32_000
     compaction_keep_recent: int = 4  # messages to keep when compacting
-    user_agent: str = ""  # required for some endpoints (e.g. Kimi coding API)
-    thinking: bool = True  # enable reasoning mode (kimi-k2.5, kimi-k2-thinking)
+    user_agent: str = ""  # required for some endpoints
+    thinking: bool = True  # provider-specific reasoning mode when supported
     temperature: float = 1.0  # 1.0 for thinking models, 0.6 for non-thinking
-    top_p: float = 0.95  # recommended for kimi-k2.5
+    top_p: float = 0.95
     max_tokens: int = 32_000  # output token limit
     memory_flush_enabled: bool = True  # run pre-compaction memory flush turn
+
+
+class KimiSettings(LLMSettings):
+    """Backward-compatible env prefix for existing deployments."""
+
+    model_config = SettingsConfigDict(env_prefix="KIMI_")
+    model: str = "kimi-k2.5"
+    base_url: str = "https://api.moonshot.cn/v1"
 
 
 class HeartbeatSettings(BaseSettings):
@@ -81,6 +91,7 @@ class Settings(BaseSettings):
     brave_api_key: str = ""  # Brave Search API key
 
     matrix: MatrixSettings = Field(default_factory=MatrixSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
     kimi: KimiSettings = Field(default_factory=KimiSettings)
     heartbeat: HeartbeatSettings = Field(default_factory=HeartbeatSettings)
     caldav: CalDavSettings = Field(default_factory=CalDavSettings)

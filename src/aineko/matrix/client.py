@@ -327,7 +327,7 @@ class MatrixConnector:
             for room in self._client.rooms.values():
                 for user_id in room.users:
                     user_ids.add(user_id)
-            if user_ids and self._client.olm:
+            if user_ids and self._client.olm and self._client.should_query_keys:
                 logger.info("Matrix: querying keys for %d users...", len(user_ids))
                 await asyncio.wait_for(self._client.keys_query(), timeout=15)
                 await self._trust_all_devices()

@@ -1,6 +1,8 @@
 """Bash execution tool."""
 
 import asyncio
+import os
+import signal
 
 from aineko.tools.registry import ToolDef
 
@@ -15,6 +17,7 @@ async def run_bash(command: str, timeout: int = 60, description: str = "") -> st
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd="/data",
+            start_new_session=True,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = stdout.decode(errors="replace")
@@ -26,11 +29,18 @@ async def run_bash(command: str, timeout: int = 60, description: str = "") -> st
         return output + exit_info
     except asyncio.TimeoutError:
         if proc is not None:
-            proc.kill()
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             # Drain pipes so the subprocess transport closes cleanly instead
             # of being finalized later via __del__ on a possibly-closed loop.
             try:
-                await proc.communicate()
+                await asyncio.wait_for(proc.communicate(), timeout=5)
             except Exception:
                 pass
         return f"Command timed out after {timeout}s"

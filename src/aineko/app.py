@@ -252,13 +252,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Tools
     tools: ToolRegistry = build_tools()
     web_search_mod.brave_api_key = settings.brave_api_key
-    image_mod._settings = settings.kimi
+    image_mod._settings = settings.llm
     calendar_mod.caldav_url = settings.caldav.url
     calendar_mod.caldav_username = settings.caldav.username
     calendar_mod.caldav_password = settings.caldav.password
 
-    # Kimi
-    kimi: KimiClient = KimiClient(settings.kimi)
+    # LLM
+    kimi: KimiClient = KimiClient(settings.llm)
 
     # Memory dir (daily logs)
     memory_dir: Path = settings.data_dir / "memory"
@@ -280,8 +280,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             logger.warning(
                 "setup.sh failed (exit %d): %s", result.returncode, result.stderr[:500]
             )
-    max_ctx: int = settings.kimi.max_context_tokens
-    keep_recent: int = settings.kimi.compaction_keep_recent
+    max_ctx: int = settings.llm.max_context_tokens
+    keep_recent: int = settings.llm.compaction_keep_recent
 
     # Background task manager
     bg_task_mgr: BackgroundTaskManager = BackgroundTaskManager()
